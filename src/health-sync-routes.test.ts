@@ -1,1466 +1,1025 @@
-import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
-import { Hono } from "hono";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import {
-    createHealthSyncRouter,
-    isHealthSyncPath,
-    type HealthActivityData,
-    type HealthSyncData,
-} from "./health-sync-routes.js";
-import type { ActivityWrite } from "./health-activity-sync.js";
-import { HEALTH_ACTIVITY_SHORTCUT_NAME } from "./health-activity-sync.js";
-import type {
-    HealthActivityLinkRow,
-    HealthActivityLinkStore,
-    HealthSyncDayRow,
-    HealthSyncLinkRow,
-    HealthSyncPendingRow,
-    HealthSyncStore,
+    OWNER_ID,
+    createSqliteHealthSyncStore,
+    getAllActiveCalories,
+    insertActiveCalories,
+    insertMeal,
+    insertWater,
+    upsertProfile,
+    type HealthSyncStore,
 } from "./db/repo.js";
-import type { HealthSyncMeal, HealthSyncWater } from "./health-sync.js";
-import { HEALTH_SYNC_SHORTCUT_NAME } from "./health-sync.js";
+import { useMemoryDb } from "./db/test-helpers.js";
+import { createApp } from "./index.js";
 import { _resetBuckets, getBanState } from "./rate-limit.js";
+import { repoHealthSyncData } from "./health-sync-status.js";
 
-// Everything runs against in-memory fakes passed to createHealthSyncRouter —
-// never mock.module, which is process-wide (see CLAUDE.md). The fakes keep
-// the store's contract (secrets in raw, matched exactly; consumes single-use)
-// without its hashing, which src/health-sync-store.test.ts pins on its own.
+useMemoryDb();
 
-const NOW = Date.parse("2026-10-03T12:00:00Z"); // 15:00 in Kyiv
-const KYIV = "Europe/Kyiv";
-const BASE = "http://x";
-const USER = "11111111-2222-3333-4444-555555555555";
+const KEY = "shortcut-".padEnd(60, "Q7r");
+const MCP_KEY = "mcp-".padEnd(60, "W3x");
+const IP = "198.51.100.7";
+const API = "/api/v1/health-sync";
+// 10:00 in Kyiv on Oct 3 2026 (EEST, UTC+3).
+const T0 = Date.parse("2026-10-03T07:00:00Z");
 
-interface PendingRec {
-    row: HealthSyncPendingRow;
-    connectId: string;
-    deviceSecret: string;
-    claimCode: string | null;
-}
-
-function fakeStore() {
-    const pending: PendingRec[] = [];
-    const links = new Map<string, { row: HealthSyncLinkRow; token: string }>();
-    const days = new Map<string, HealthSyncDayRow>();
-    const calls: string[] = [];
-    const fail = new Set<string>();
-    let lookupState: "normal" | "unavailable" = "normal";
-    const maybeFail = (name: string) => {
-        calls.push(name);
-        if (fail.has(name)) throw new Error(`${name} failed`);
-    };
-    const live = (rec: PendingRec, now: Date) =>
-        rec.row.claim_expires_at !== null
-            ? Date.parse(rec.row.claim_expires_at) > now.getTime()
-            : Date.parse(rec.row.expires_at) > now.getTime();
-
-    const store: HealthSyncStore = {
-        async createPending(input) {
-            maybeFail("createPending");
-            pending.push({
-                connectId: input.connectId,
-                deviceSecret: input.deviceSecret,
-                claimCode: null,
-                row: {
-                    id: crypto.randomUUID(),
-                    kind: input.kind,
-                    fields: input.fields,
-                    tz: input.tz,
-                    backfill_days: input.backfillDays,
-                    pkce_verifier: input.pkceVerifier,
-                    user_id: null,
-                    claim_expires_at: null,
-                    created_at: new Date(NOW).toISOString(),
-                    expires_at: input.expiresAt,
-                },
-            });
-        },
-        async getPendingByConnectId(connectId, now) {
-            maybeFail("getPendingByConnectId");
-            const rec = pending.find((p) => p.connectId === connectId);
-            if (!rec) return null;
-            const at = now ?? new Date();
-            return Date.parse(rec.row.expires_at) > at.getTime()
-                ? { ...rec.row }
-                : null;
-        },
-        async setPendingClaim(connectId, claimCode, userId, until, now) {
-            maybeFail("setPendingClaim");
-            const rec = pending.find((p) => p.connectId === connectId);
-            const at = now ?? new Date();
-            if (
-                !rec ||
-                rec.claimCode !== null ||
-                Date.parse(rec.row.expires_at) <= at.getTime()
-            )
-                return false;
-            rec.claimCode = claimCode;
-            rec.row.user_id = userId;
-            rec.row.claim_expires_at = until;
-            rec.row.pkce_verifier = null;
-            return true;
-        },
-        async consumeClaim(claimCode, deviceSecret, now) {
-            maybeFail("consumeClaim");
-            const at = now ?? new Date();
-            const i = pending.findIndex(
-                (p) =>
-                    p.claimCode === claimCode &&
-                    p.deviceSecret === deviceSecret &&
-                    live(p, at),
-            );
-            if (i < 0) return null;
-            const [rec] = pending.splice(i, 1);
-            return rec!.row;
-        },
-        async replaceLink(userId, link, token) {
-            maybeFail("replaceLink");
-            links.set(userId, {
-                token,
-                row: {
-                    id: crypto.randomUUID(),
-                    user_id: userId,
-                    kind: "shortcut",
-                    fields: link.fields,
-                    fallback_tz: link.fallbackTz,
-                    sync_start_date: link.syncStartDate,
-                    lease_until: null,
-                    created_at: new Date(NOW).toISOString(),
-                    last_used_at: null,
-                    last_sync_at: null,
-                    expires_at: link.expiresAt,
-                },
-            });
-        },
-        async lookupLink(token, now) {
-            calls.push("lookupLink");
-            if (lookupState === "unavailable") return { status: "unavailable" };
-            const at = now ?? new Date();
-            for (const l of links.values()) {
-                if (
-                    l.token === token &&
-                    Date.parse(l.row.expires_at) > at.getTime()
-                )
-                    return { status: "valid", link: { ...l.row } };
-            }
-            return { status: "invalid" };
-        },
-        async touchLink(userId, lastUsedAt, expiresAt) {
-            maybeFail("touchLink");
-            const l = links.get(userId);
-            if (l) {
-                l.row.last_used_at = lastUsedAt;
-                l.row.expires_at = expiresAt;
-            }
-        },
-        async setLastSync(userId, at) {
-            maybeFail("setLastSync");
-            const l = links.get(userId);
-            if (l) l.row.last_sync_at = at;
-        },
-        async acquireLease(userId, until, now) {
-            maybeFail("acquireLease");
-            const l = links.get(userId);
-            const at = now ?? new Date();
-            if (!l) return false;
-            if (
-                l.row.lease_until !== null &&
-                Date.parse(l.row.lease_until) >= at.getTime()
-            )
-                return false;
-            l.row.lease_until = until;
-            return true;
-        },
-        async releaseLease(userId, heldUntil) {
-            maybeFail("releaseLease");
-            const l = links.get(userId);
-            if (!l) return;
-            if (heldUntil !== undefined && l.row.lease_until !== heldUntil)
-                return;
-            l.row.lease_until = null;
-        },
-        async getDays(userId, from, to) {
-            maybeFail("getDays");
-            return [...days.values()]
-                .filter(
-                    (d) =>
-                        d.user_id === userId && d.date >= from && d.date <= to,
-                )
-                .sort((a, b) => a.date.localeCompare(b.date))
-                .map((d) => structuredClone(d));
-        },
-        async insertDays(rows) {
-            maybeFail("insertDays");
-            const inserted: string[] = [];
-            for (const r of rows) {
-                const k = `${r.user_id}|${r.date}`;
-                if (days.has(k)) continue;
-                days.set(k, structuredClone(r));
-                inserted.push(r.date);
-            }
-            return inserted;
-        },
-        async updateDay(userId, date, patch, expect) {
-            maybeFail("updateDay");
-            const d = days.get(`${userId}|${date}`);
-            if (
-                !d ||
-                d.topup_seq !== expect.topup_seq ||
-                (d.sent_values === null) !== expect.sentNull
-            )
-                return false;
-            Object.assign(d, structuredClone(patch));
-            return true;
-        },
-        async deleteLink(userId) {
-            maybeFail("deleteLink");
-            links.delete(userId);
-            for (const [k, d] of days) if (d.user_id === userId) days.delete(k);
-        },
-        async getLinkStatus() {
-            return null;
-        },
-        async getDaysForExport() {
-            return [];
-        },
-    };
-    return {
-        store,
-        pending,
-        links,
-        days,
-        calls,
-        fail,
-        setLookup(s: "normal" | "unavailable") {
-            lookupState = s;
-        },
-    };
-}
-
-function fakeData(
-    opts: {
-        tz?: string | null;
-        meals?: Partial<HealthSyncMeal>[];
-        water?: HealthSyncWater[];
-    } = {},
-) {
-    const fail = new Set<string>();
-    const reads: string[] = [];
-    const data: HealthSyncData = {
-        async getProfileTimezone() {
-            reads.push("profile");
-            if (fail.has("profile")) throw new Error("profile down");
-            return opts.tz === undefined ? KYIV : opts.tz;
-        },
-        async getMeals() {
-            reads.push("meals");
-            if (fail.has("meals"))
-                throw new Error("meals: result would be truncated (1 of 2)");
-            return (opts.meals ?? []) as HealthSyncMeal[];
-        },
-        async getWater() {
-            reads.push("water");
-            if (fail.has("water")) throw new Error("water down");
-            return opts.water ?? [];
-        },
-    };
-    return { data, fail, reads };
-}
-
-/** The activity link table and the active-calories writes, in memory. */
-function fakeActivity(opts: { tz?: string | null; creditPct?: number } = {}) {
-    const links = new Map<
-        string,
-        { row: HealthActivityLinkRow; token: string }
-    >();
-    const writes: { userId: string; days: ActivityWrite[] }[] = [];
-    const fail = new Set<string>();
-    const activityStore: HealthActivityLinkStore = {
-        async replaceActivityLink(userId, link, token) {
-            if (fail.has("replaceActivityLink")) throw new Error("down");
-            links.set(userId, {
-                token,
-                row: {
-                    id: crypto.randomUUID(),
-                    user_id: userId,
-                    fallback_tz: link.fallbackTz,
-                    created_at: new Date(NOW).toISOString(),
-                    last_used_at: null,
-                    last_sync_at: null,
-                    expires_at: link.expiresAt,
-                },
-            });
-        },
-        async lookupActivityLink(token, now) {
-            const at = now ?? new Date();
-            for (const l of links.values()) {
-                if (
-                    l.token === token &&
-                    Date.parse(l.row.expires_at) > at.getTime()
-                )
-                    return { status: "valid", link: { ...l.row } };
-            }
-            return { status: "invalid" };
-        },
-        async touchActivityLink(userId, lastUsedAt, expiresAt) {
-            const l = links.get(userId);
-            if (l) {
-                l.row.last_used_at = lastUsedAt;
-                l.row.expires_at = expiresAt;
-            }
-        },
-        async setActivitySynced(userId, at, fallbackTz) {
-            const l = links.get(userId);
-            if (l) {
-                l.row.last_sync_at = at;
-                if (fallbackTz !== null) l.row.fallback_tz = fallbackTz;
-            }
-        },
-        async deleteActivityLink(userId) {
-            links.delete(userId);
-        },
-        async getActivityLinkStatus() {
-            return null;
-        },
-    };
-    const activityData: HealthActivityData = {
-        async getActivityProfile() {
-            if (fail.has("profile")) throw new Error("profile down");
-            return {
-                tz: opts.tz === undefined ? KYIV : opts.tz,
-                creditPct: opts.creditPct ?? 100,
-            };
-        },
-        async writeActivityDays(userId, days) {
-            if (fail.has("write")) throw new Error("write down");
-            writes.push({ userId, days: [...days] });
-            return days.length;
-        },
-    };
-    return {
-        activityStore,
-        activityData,
-        activityLinks: links,
-        writes,
-        activityFail: fail,
-    };
-}
-
-function setup(
-    dataOpts: Parameters<typeof fakeData>[0] = {},
-    activityOpts: Parameters<typeof fakeActivity>[0] = {},
-) {
-    const s = fakeStore();
-    const d = fakeData(dataOpts);
-    const a = fakeActivity(activityOpts);
-    let clock = NOW;
-    const router = createHealthSyncRouter({
-        activityStore: a.activityStore,
-        activityData: a.activityData,
-        store: s.store,
-        data: d.data,
-        now: () => clock,
-    });
-    const app = new Hono();
-    app.route("/", router);
-    app.onError((err, c) => {
-        // Nothing may fall through to the app's error handler.
-        throw new Error(`reached onError: ${err.message}`);
-        return c.text("x", 500);
-    });
-    const req = (
-        path: string,
-        init: {
-            method?: string;
-            body?: unknown;
-            token?: string;
-            ip?: string;
-            headers?: Record<string, string>;
-        } = {},
-    ) =>
-        app.request(`${BASE}${path}`, {
-            method: init.method ?? "GET",
-            headers: {
-                "x-forwarded-for": init.ip ?? "203.0.113.7",
-                ...(init.body !== undefined
-                    ? { "content-type": "application/json" }
-                    : {}),
-                ...(init.token
-                    ? { Authorization: `Bearer ${init.token}` }
-                    : {}),
-                ...init.headers,
-            },
-            ...(init.body !== undefined
-                ? {
-                      body:
-                          typeof init.body === "string"
-                              ? init.body
-                              : JSON.stringify(init.body),
-                  }
-                : {}),
-        });
-    return {
-        ...s,
-        ...a,
-        dataFail: d.fail,
-        reads: d.reads,
-        req,
-        setClock: (t: number) => {
-            clock = t;
-        },
-    };
-}
-
-type Ctx = ReturnType<typeof setup>;
-
-/** Seed a link directly, as /claim would have written it. */
-function seedLink(
-    ctx: Ctx,
-    over: Partial<HealthSyncLinkRow> = {},
-    token = `nmhs_${"a".repeat(43)}`,
-) {
-    ctx.links.set(USER, {
-        token,
-        row: {
-            id: "link-1",
-            user_id: USER,
-            kind: "shortcut",
-            fields: [
-                "energy_kcal",
-                "protein_g",
-                "carbohydrates_g",
-                "fat_g",
-                "fiber_g",
-                // Links created before sugar left the sync still list it;
-                // the routes drop it, so a meal's sugar is never offered.
-                "sugar_g",
-                "caffeine_mg",
-            ],
-            fallback_tz: null,
-            sync_start_date: "2026-09-25",
-            lease_until: null,
-            created_at: "2026-09-25T10:00:00.000Z",
-            last_used_at: null,
-            last_sync_at: null,
-            expires_at: "2026-12-25T10:00:00.000Z",
-            ...over,
-        },
-    });
-    return token;
-}
-
-/** A day row as /pending leaves it once it has offered the initial entry. */
-function offeredRow(date: string): HealthSyncDayRow {
-    return {
-        user_id: USER,
-        date,
-        timezone: KYIV,
-        sent_values: null,
-        topup_seq: 0,
-        offer_count: 1,
-        notified: {},
-        first_sent_at: null,
-        last_sent_at: null,
-    };
-}
-
+let clock = T0;
+let store: HealthSyncStore;
+let app: ReturnType<typeof createApp>;
 let logSpy: ReturnType<typeof spyOn>;
 let warnSpy: ReturnType<typeof spyOn>;
-const lines = () =>
-    [...logSpy.mock.calls, ...warnSpy.mock.calls]
-        .map((args) => args.map(String).join(" "))
-        .filter((l) => l.startsWith("[health-sync]"));
-
-// The ban test identifies clients by X-Forwarded-For, which the perimeter only
-// believes with TRUST_PROXY=1.
 const trustBefore = process.env.TRUST_PROXY;
-beforeEach(() => {
-    process.env.TRUST_PROXY = "1";
+
+beforeEach(async () => {
     _resetBuckets();
+    delete process.env.TRUST_PROXY;
+    clock = T0;
+    store = createSqliteHealthSyncStore();
+    app = makeApp();
     logSpy = spyOn(console, "log").mockImplementation(() => {});
     warnSpy = spyOn(console, "warn").mockImplementation(() => {});
+    await upsertProfile(OWNER_ID, { timezone: "Europe/Kyiv" });
 });
 afterEach(() => {
-    if (trustBefore === undefined) delete process.env.TRUST_PROXY;
-    else process.env.TRUST_PROXY = trustBefore;
     logSpy.mockRestore();
     warnSpy.mockRestore();
-    _resetBuckets();
+    if (trustBefore === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = trustBefore;
 });
 
-describe("link-token auth", () => {
-    test("a missing token is a 401 invalid_token with a realm challenge", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/pending");
-        expect(r.status).toBe(401);
-        expect(r.headers.get("www-authenticate")).toBe(
-            'Bearer realm="nutrition-mcp", error="invalid_token"',
+function makeApp(
+    healthSync: Parameters<typeof createApp>[0]["healthSync"] = {},
+) {
+    return createApp({
+        mcpKey: () => MCP_KEY,
+        shortcutKey: () => KEY,
+        exportSecret: () => "e".repeat(40),
+        healthSync: { now: () => clock, ...healthSync },
+    });
+}
+
+interface Opts {
+    key?: string | null;
+    scheme?: string;
+    body?: unknown;
+    ip?: string;
+    headers?: Record<string, string>;
+}
+function call(method: string, path: string, o: Opts = {}) {
+    const headers: Record<string, string> = { ...o.headers };
+    const key = o.key === undefined ? KEY : o.key;
+    if (key !== null) headers.authorization = `${o.scheme ?? "Bearer"} ${key}`;
+    let body: string | undefined;
+    if (o.body !== undefined) {
+        headers["content-type"] = "application/json";
+        body = typeof o.body === "string" ? o.body : JSON.stringify(o.body);
+    }
+    return app.request(
+        `http://x${path}`,
+        { method, headers, body },
+        { ip: o.ip ?? IP },
+    );
+}
+const get = (path: string, o?: Opts) => call("GET", path, o);
+const post = (path: string, body?: unknown, o: Opts = {}) =>
+    call("POST", path, { ...o, body: body ?? {} });
+const json = async (r: Response) => (await r.json()) as Record<string, any>;
+
+/** Logs a meal at a UTC instant (Kyiv is +3 in early October). */
+const eat = (iso: string, calories: number, extra: object = {}) =>
+    insertMeal(OWNER_ID, {
+        description: "synthetic meal",
+        meal_type: "lunch",
+        calories,
+        logged_at: iso,
+        ...extra,
+    });
+
+/** What the Shortcut does: pending, then ack every entry exactly as offered. */
+async function syncOnce(o: Opts = {}) {
+    const p = await json(await get(`${API}/pending`, o));
+    expect(p.ok).toBe(true);
+    if (p.count > 0) {
+        const a = await json(
+            await post(
+                `${API}/ack`,
+                {
+                    entries: p.entries.map((e: any) => ({
+                        entry_id: e.entry_id,
+                        date: e.date,
+                        values: e.values,
+                    })),
+                    done: true,
+                    lease_until: p.lease_until,
+                },
+                o,
+            ),
         );
-        const b = (await r.json()) as Record<string, string>;
-        expect(b).toMatchObject({ ok: false, error: "invalid_token" });
-        expect(b.message).toContain("Nutrition MCP Health");
-    });
+        expect(a.ok).toBe(true);
+        return { p, a };
+    }
+    return { p, a: null };
+}
 
-    test("a token without the nmhs_ shape is refused without a lookup", async () => {
-        const ctx = setup();
-        seedLink(ctx);
-        // The shape newOpaqueToken() mints.
-        const stray = "Q".repeat(43);
-        const r = await ctx.req("/api/v1/health-sync/pending", {
-            token: stray,
-        });
-        expect(r.status).toBe(401);
-        expect(ctx.calls).not.toContain("lookupLink");
-    });
+describe("authentication", () => {
+    const routes: [string, string][] = [
+        ["GET", `${API}/pending`],
+        ["POST", `${API}/ack`],
+        ["POST", `${API}/activity`],
+        ["GET", `${API}/status`],
+        ["POST", `${API}/revoke`],
+        ["GET", `${API}/nope`],
+    ];
 
-    test("an unknown nmhs_ token is looked up and refused", async () => {
-        const ctx = setup();
-        seedLink(ctx);
-        const r = await ctx.req("/api/v1/health-sync/pending", {
-            token: `nmhs_${"z".repeat(43)}`,
-        });
-        expect(r.status).toBe(401);
-        expect(ctx.calls).toContain("lookupLink");
-    });
+    test.each(routes)(
+        "%s %s without a key is a 401 in the envelope",
+        async (m, p) => {
+            const r = await call(m, p, { key: null });
+            expect(r.status).toBe(401);
+            expect(r.headers.get("www-authenticate")).toContain("Bearer");
+            expect(r.headers.get("cache-control")).toContain("no-store");
+            expect(await json(r)).toMatchObject({
+                ok: false,
+                error: "unauthorized",
+            });
+        },
+    );
 
-    test("an expired link is refused", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx, {
-            expires_at: "2026-10-01T00:00:00.000Z",
-        });
-        const r = await ctx.req("/api/v1/health-sync/pending", { token });
-        expect(r.status).toBe(401);
-    });
-
-    test("unavailable is a 503 with no strike, so an outage never bans", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        ctx.setLookup("unavailable");
-        for (let i = 0; i < 25; i++) {
-            const r = await ctx.req("/api/v1/health-sync/pending", { token });
-            expect(r.status).toBe(503);
-            const b = (await r.json()) as Record<string, string>;
-            expect(b.error).toBe("unavailable");
-            expect(b.ref).toMatch(/^[0-9a-f]{8}$/);
+    test("wrong key, wrong length, wrong scheme, extra words, the MCP key and an empty token all look identical", async () => {
+        const variants: Opts[] = [
+            { key: "wrong-" + KEY },
+            { key: KEY.slice(0, -1) },
+            { key: KEY + "x" },
+            { key: KEY, scheme: "Basic" },
+            { key: `${KEY} extra` },
+            { key: MCP_KEY },
+            { key: "" },
+            { key: null, headers: { authorization: "Bearer" } },
+            { key: null, headers: { authorization: KEY } },
+        ];
+        const shapes = [];
+        for (const v of variants) {
+            const r = await get(`${API}/pending`, v);
+            expect(r.status).toBe(401);
+            shapes.push({ status: r.status, body: await r.text() });
         }
-        expect(getBanState("203.0.113.7").banned).toBe(false);
-        ctx.setLookup("normal");
+        expect(new Set(shapes.map((s) => s.body)).size).toBe(1);
+    });
+
+    test("the key is accepted ONLY as a bearer header, never in the URL or body", async () => {
+        const inQuery = await get(`${API}/pending?key=${KEY}`, { key: null });
+        expect(inQuery.status).toBe(401);
+        const inBody = await post(
+            `${API}/ack`,
+            { key: KEY, done: true },
+            { key: null },
+        );
+        expect(inBody.status).toBe(401);
+        const asApiKeyHeader = await get(`${API}/pending`, {
+            key: null,
+            headers: { "x-api-key": KEY },
+        });
+        expect(asApiKeyHeader.status).toBe(401);
+    });
+
+    test("with the right key, a wrong method or an unknown path answers in the envelope", async () => {
+        const wrongMethod = await post(`${API}/pending`);
+        expect(wrongMethod.status).toBe(405);
+        expect(wrongMethod.headers.get("allow")).toBe("GET");
+        expect(await json(wrongMethod)).toMatchObject({ ok: false });
+        const unknown = await get(`${API}/nope`);
+        expect(unknown.status).toBe(404);
+        expect(await json(unknown)).toMatchObject({
+            ok: false,
+            message: "Unknown endpoint.",
+        });
+    });
+
+    test("20 consecutive failures ban the address (429, Retry-After), even for the right key; others are fine", async () => {
+        for (let i = 0; i < 20; i++) {
+            expect(
+                (await get(`${API}/pending`, { key: `bad${i}` })).status,
+            ).toBe(401);
+        }
+        expect(getBanState(IP).banned).toBe(true);
+        const shed = await get(`${API}/pending`);
+        expect(shed.status).toBe(429);
+        expect(Number(shed.headers.get("retry-after"))).toBeGreaterThan(0);
+        expect(await json(shed)).toMatchObject({
+            ok: false,
+            error: "rate_limited",
+        });
         expect(
-            (await ctx.req("/api/v1/health-sync/pending", { token })).status,
+            (await get(`${API}/pending`, { ip: "203.0.113.9" })).status,
         ).toBe(200);
     });
 
-    test("invalid tokens strike, and a banned IP is shed in the envelope", async () => {
-        const ctx = setup();
-        for (let i = 0; i < 20; i++) {
-            const r = await ctx.req("/api/v1/health-sync/pending", {
-                token: `nmhs_${"y".repeat(43)}`,
-            });
-            expect(r.status).toBe(401);
+    test("failures here and at the MCP path count together (one ban per address)", async () => {
+        for (let i = 0; i < 10; i++)
+            await get(`${API}/pending`, { key: `bad${i}` });
+        for (let i = 0; i < 10; i++) {
+            await app.request(
+                `http://x/mcp/bad${i}`,
+                { method: "POST" },
+                { ip: IP },
+            );
         }
-        expect(getBanState("203.0.113.7").banned).toBe(true);
-        const lookups = ctx.calls.filter((c) => c === "lookupLink").length;
-        const r = await ctx.req("/api/v1/health-sync/pending", {
-            token: `nmhs_${"y".repeat(43)}`,
-        });
-        expect(r.status).toBe(429);
-        expect(await r.json()).toMatchObject({
-            ok: false,
-            error: "rate_limited",
-        });
-        expect(ctx.calls.filter((c) => c === "lookupLink").length).toBe(
-            lookups,
+        expect(getBanState(IP).banned).toBe(true);
+    });
+
+    test("a success clears the run of failures", async () => {
+        for (let i = 0; i < 15; i++)
+            await get(`${API}/pending`, { key: `bad${i}` });
+        expect((await get(`${API}/pending`)).status).toBe(200);
+        for (let i = 0; i < 15; i++)
+            await get(`${API}/pending`, { key: `again${i}` });
+        expect(getBanState(IP).banned).toBe(false);
+    });
+
+    test("a runaway shortcut is held to the per-owner request budget", async () => {
+        let limited = 0;
+        for (let i = 0; i < 60; i++) {
+            const r = await get(`${API}/status`);
+            if (r.status === 429) {
+                limited++;
+                expect(r.headers.get("retry-after")).toBeTruthy();
+                expect(await json(r)).toMatchObject({ error: "rate_limited" });
+            }
+        }
+        expect(limited).toBeGreaterThan(0);
+    });
+
+    test("the key never appears in a log line or a response, successful or not", async () => {
+        await eat("2026-10-03T06:00:00Z", 500);
+        const seen: string[] = [];
+        const bodies: string[] = [];
+        for (const r of [
+            await get(`${API}/pending`),
+            await get(`${API}/pending`, { key: "wrong-" + KEY }),
+            await post(`${API}/ack`, { entries: [], done: true }),
+            await post(`${API}/ack`, "{not json"),
+            await get(`${API}/status`),
+        ]) {
+            bodies.push(await r.text());
+            for (const [, v] of r.headers) seen.push(v);
+        }
+        const logs = [...logSpy.mock.calls, ...warnSpy.mock.calls].map((c) =>
+            c.map(String).join(" "),
         );
-    });
-
-    test("last use is stamped at most once an hour", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            token,
-            body: { entries: [], done: true },
-        });
-        await new Promise((r) => setTimeout(r, 0));
-        expect(ctx.calls.filter((c) => c === "touchLink")).toHaveLength(1);
-        const row = ctx.links.get(USER)!.row;
-        expect(row.last_used_at).toBe(new Date(NOW).toISOString());
-        expect(Date.parse(row.expires_at)).toBe(NOW + 90 * 86_400_000);
-        ctx.setClock(NOW + 30 * 60_000);
-        await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            token,
-            body: { entries: [], done: true },
-        });
-        await new Promise((r) => setTimeout(r, 0));
-        expect(ctx.calls.filter((c) => c === "touchLink")).toHaveLength(1);
-    });
-
-    test("the per-user bucket is 40 a minute, answered in the envelope", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        for (let i = 0; i < 40; i++) {
-            const r = await ctx.req("/api/v1/health-sync/ack", {
-                method: "POST",
-                token,
-                body: { entries: [], done: true },
-            });
-            expect(r.status).toBe(200);
-        }
-        const r = await ctx.req("/api/v1/health-sync/pending", { token });
-        expect(r.status).toBe(429);
-        expect(r.headers.get("retry-after")).toBeTruthy();
-        expect(await r.json()).toMatchObject({
-            ok: false,
-            error: "rate_limited",
-        });
+        for (const text of [...seen, ...bodies, ...logs])
+            expect(text).not.toContain(KEY);
+        expect(
+            logs.some((l) =>
+                l.startsWith("[health-sync] route=pending result=ok"),
+            ),
+        ).toBe(true);
+        expect(
+            logs.some((l) =>
+                l.startsWith("[req] GET /api/v1/health-sync/pending 200"),
+            ),
+        ).toBe(true);
     });
 });
 
 describe("GET /pending", () => {
-    const meals = [
-        // Oct 2 in Kyiv (UTC+3).
-        {
-            logged_at: "2026-10-02T06:00:00Z",
-            calories: 600,
-            protein_g: 30.04,
-            carbs_g: null,
-            fat_g: 20,
-            fiber_g: null,
-            sugar_g: null,
-            caffeine_mg: 95,
-        },
-        {
-            logged_at: "2026-10-02T18:30:00Z",
-            calories: 900,
-            protein_g: 40,
-            carbs_g: null,
-            fat_g: null,
-            fiber_g: null,
-            sugar_g: 0,
-            caffeine_mg: null,
-        },
-        // Oct 3 in Kyiv: not closed yet at 15:00 local.
-        {
-            logged_at: "2026-10-03T08:00:00Z",
-            calories: 400,
-            protein_g: 10,
-            carbs_g: 50,
-            fat_g: 10,
-            fiber_g: 5,
-            sugar_g: 5,
-            caffeine_mg: 0,
-        },
-    ] as unknown as Partial<HealthSyncMeal>[];
-
-    test("offers closed days only, omitting nulls, and records the offer", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        const r = await ctx.req("/api/v1/health-sync/pending", { token });
-        expect(r.status).toBe(200);
-        expect(r.headers.get("cache-control")).toBe("private, no-store");
-        const b = (await r.json()) as Record<string, any>;
-        expect(b).toMatchObject({
+    test("nothing logged: ok, no entries, and no lease is left held", async () => {
+        const r = await json(await get(`${API}/pending`));
+        expect(r).toMatchObject({
             ok: true,
-            version: 1,
-            complete: true,
-            timezone: KYIV,
+            version: 2,
+            timezone: "Europe/Kyiv",
             timezone_source: "profile",
+            window: { from: "2026-09-27", to: "2026-10-03" },
+            lease_until: null,
+            count: 0,
+            entries: [],
+            discrepancies: [],
             notices: [],
         });
-        expect(b.lease_until).toBe(new Date(NOW + 120_000).toISOString());
-        expect(b.entries).toEqual([
+        expect(r.now).toBe("2026-10-03T10:00:00+03:00");
+        expect((await store.getState(OWNER_ID)).lease_until).toBeNull();
+        expect((await store.getState(OWNER_ID)).last_sync_at).toBe(
+            new Date(T0).toISOString(),
+        );
+    });
+
+    test("offers today's totals as one entry with the lease and a sample time", async () => {
+        await eat("2026-10-03T05:00:00Z", 450, {
+            protein_g: 20,
+            caffeine_mg: 95,
+        });
+        await eat("2026-10-03T06:00:00Z", 300, { protein_g: 10 });
+        const r = await json(await get(`${API}/pending`));
+        expect(r.count).toBe(1);
+        expect(r.entries[0]).toEqual({
+            entry_id: "2026-10-03:r1",
+            date: "2026-10-03",
+            closed: false,
+            sample_at: "2026-10-03T10:00:00+03:00",
+            values: { energy_kcal: 750, protein_g: 30, caffeine_mg: 95 },
+        });
+        expect(r.lease_until).toBe(new Date(T0 + 120_000).toISOString());
+    });
+
+    test("the profile's timezone decides the day; the phone's ?tz only stands in when none is set", async () => {
+        // 22:30Z Oct 2 = 01:30 Oct 3 in Kyiv, but still Oct 2 in New York.
+        await eat("2026-10-02T22:30:00Z", 400);
+        const kyiv = await json(
+            await get(`${API}/pending?tz=America/New_York`),
+        );
+        expect(kyiv.timezone).toBe("Europe/Kyiv");
+        expect(kyiv.entries[0].date).toBe("2026-10-03");
+        await store.releaseLease(OWNER_ID);
+        // No profile timezone: the phone's is used, and nothing is written to the profile.
+        await upsertProfile(OWNER_ID, { timezone: null as never });
+        const { getProfile } = await import("./db/repo.js");
+        const ny = await json(await get(`${API}/pending?tz=America/New_York`));
+        expect(ny.timezone).toBe("America/New_York");
+        expect(ny.timezone_source).toBe("phone");
+        expect((await getProfile(OWNER_ID))!.timezone).toBeNull();
+        await store.releaseLease(OWNER_ID);
+        const utc = await json(await get(`${API}/pending?tz=Not/AZone`));
+        expect(utc.timezone).toBe("UTC");
+    });
+
+    test("water is offered only when the run asks for it", async () => {
+        await eat("2026-10-03T05:00:00Z", 400);
+        await insertWater(OWNER_ID, {
+            amount_ml: 750,
+            logged_at: "2026-10-03T05:30:00Z",
+        });
+        const off = await json(await get(`${API}/pending`));
+        expect(off.entries[0].values).toEqual({ energy_kcal: 400 });
+        await store.releaseLease(OWNER_ID);
+        const on = await json(await get(`${API}/pending?water=1`));
+        expect(on.entries[0].values).toEqual({
+            energy_kcal: 400,
+            water_ml: 750,
+        });
+        await store.releaseLease(OWNER_ID);
+        const alias = await json(
+            await get(`${API}/pending?include_water=true`),
+        );
+        expect(alias.entries[0].values.water_ml).toBe(750);
+    });
+
+    test("an overlapping run is told it is busy and offered nothing; it can run once the lease is freed or lapses", async () => {
+        await eat("2026-10-03T05:00:00Z", 400);
+        const first = await json(await get(`${API}/pending`));
+        expect(first.count).toBe(1);
+        const second = await get(`${API}/pending`);
+        expect(second.status).toBe(409);
+        expect(await json(second)).toMatchObject({ ok: false, error: "busy" });
+        // lapsed
+        clock = T0 + 121_000;
+        const third = await json(await get(`${API}/pending`));
+        expect(third.count).toBe(1);
+        expect(third.lease_until).toBe(new Date(clock + 120_000).toISOString());
+    });
+
+    test("an empty run does not take the lease from a real one", async () => {
+        const empty = await json(await get(`${API}/pending`));
+        expect(empty.count).toBe(0);
+        await eat("2026-10-03T05:00:00Z", 400);
+        expect((await json(await get(`${API}/pending`))).count).toBe(1);
+    });
+
+    test("reports a discrepancy instead of writing a negative", async () => {
+        const meal = await eat("2026-10-03T05:00:00Z", 800);
+        await syncOnce();
+        const { deleteMeal } = await import("./db/repo.js");
+        await deleteMeal(OWNER_ID, meal.meal.id);
+        await eat("2026-10-03T05:30:00Z", 500);
+        const r = await json(await get(`${API}/pending`));
+        expect(r.count).toBe(0);
+        expect(r.discrepancies).toEqual([
             {
-                entry_id: "2026-10-02:i",
-                date: "2026-10-02",
-                kind: "initial",
-                sample_local: "2026-10-02 12:00:00",
-                values: {
-                    energy_kcal: 1500,
-                    protein_g: 70,
-                    fat_g: 20,
-                    caffeine_mg: 95,
-                },
+                date: "2026-10-03",
+                field: "energy_kcal",
+                sent: 800,
+                current: 500,
+                difference: -300,
             },
         ]);
-        expect(b.status).toEqual({
-            synced_through: "2026-10-01",
-            next_day_ready_at: "2026-10-04T05:00:00+03:00",
+    });
+
+    test("fails closed when a read fails: 503, nothing offered, lease handed back", async () => {
+        await eat("2026-10-03T05:00:00Z", 400);
+        const broken = makeApp({
+            now: () => clock,
+            data: {
+                ...repoHealthSyncData,
+                getMeals: async () => {
+                    throw new Error("disk I/O error");
+                },
+            },
         });
-        // Water is off for this link: never read.
-        expect(ctx.reads).not.toContain("water");
-        const day = ctx.days.get(`${USER}|2026-10-02`)!;
-        expect(day.offer_count).toBe(1);
-        expect(day.sent_values).toBeNull();
-        expect(lines()).toEqual([
-            "[health-sync] route=pending result=ok entries=1 notices=0",
-        ]);
-    });
-
-    test("a second run inside the lease is busy", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        expect(
-            (await ctx.req("/api/v1/health-sync/pending", { token })).status,
-        ).toBe(200);
-        const r = await ctx.req("/api/v1/health-sync/pending", { token });
-        expect(r.status).toBe(409);
-        expect(await r.json()).toMatchObject({ ok: false, error: "busy" });
-        // Once it lapses, a run goes through again.
-        ctx.setClock(NOW + 121_000);
-        expect(
-            (await ctx.req("/api/v1/health-sync/pending", { token })).status,
-        ).toBe(200);
-    });
-
-    test("fails closed: a read failure computes and writes nothing, and frees the lease", async () => {
-        for (const which of ["meals", "water", "profile"]) {
-            const ctx = setup({ meals });
-            const token = seedLink(ctx, {
-                fields: ["energy_kcal", "water_ml"],
-            });
-            ctx.dataFail.add(which);
-            const r = await ctx.req("/api/v1/health-sync/pending", { token });
-            expect(r.status).toBe(503);
-            const b = (await r.json()) as Record<string, unknown>;
-            expect(b.ok).toBe(false);
-            expect(b.error).toBe("unavailable");
-            expect(b.entries).toBeUndefined();
-            expect(ctx.calls).not.toContain("insertDays");
-            expect(ctx.calls).not.toContain("updateDay");
-            expect(ctx.days.size).toBe(0);
-            await new Promise((res) => setTimeout(res, 0));
-            expect(ctx.links.get(USER)!.row.lease_until).toBeNull();
-            const line = lines()[0]!;
-            expect(line).toContain("route=pending result=unavailable ref=");
-            expect(line).not.toContain(USER);
-        }
-    });
-
-    test("a ledger read failure fails closed too", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        ctx.fail.add("getDays");
-        const r = await ctx.req("/api/v1/health-sync/pending", { token });
+        const r = await broken.request(
+            `http://x${API}/pending`,
+            { headers: { authorization: `Bearer ${KEY}` } },
+            { ip: IP },
+        );
         expect(r.status).toBe(503);
-        expect(ctx.calls).not.toContain("insertDays");
-        expect(ctx.calls).not.toContain("updateDay");
+        const body = (await r.json()) as Record<string, any>;
+        expect(body).toMatchObject({ ok: false, error: "unavailable" });
+        expect(body.message).not.toContain("disk I/O");
+        expect((await store.getState(OWNER_ID)).lease_until).toBeNull();
+        // the raw text is in the log under the same ref, not in the response
+        const logs = warnSpy.mock.calls
+            .map((c: unknown[]) => c.map(String).join(" "))
+            .join("\n");
+        expect(logs).toContain(`ref=${body.ref}`);
+        expect(logs).toContain("disk I/O error");
     });
 
-    test("an empty window answers without reading meals", async () => {
-        const ctx = setup({ meals });
-        // Paired today with no backfill: nothing has closed yet.
-        const token = seedLink(ctx, { sync_start_date: "2026-10-03" });
-        const r = await ctx.req("/api/v1/health-sync/pending", { token });
-        const b = (await r.json()) as Record<string, any>;
-        expect(b.entries).toEqual([]);
-        expect(b.status.synced_through).toBeNull();
-        expect(ctx.reads).not.toContain("meals");
-    });
-
-    test("falls back to the phone's zone, then UTC", async () => {
-        const phone = setup({ tz: null });
-        const t1 = seedLink(phone, { fallback_tz: "Asia/Tokyo" });
-        const b1 = (await (
-            await phone.req("/api/v1/health-sync/pending", { token: t1 })
-        ).json()) as Record<string, any>;
-        expect(b1.timezone).toBe("Asia/Tokyo");
-        expect(b1.timezone_source).toBe("phone");
-
-        const utc = setup({ tz: null });
-        const t2 = seedLink(utc);
-        const b2 = (await (
-            await utc.req("/api/v1/health-sync/pending", { token: t2 })
-        ).json()) as Record<string, any>;
-        expect(b2.timezone).toBe("UTC");
-        expect(b2.timezone_source).toBe("utc");
+    test("old ledger days are swept past the retention", async () => {
+        await store.commitDay(
+            OWNER_ID,
+            0,
+            {
+                date: "2026-09-20",
+                timezone: "Europe/Kyiv",
+                rounds: 1,
+                sent: { energy_kcal: 5 },
+                first_sent_at: null,
+                last_sent_at: null,
+            },
+            new Date(T0).toISOString(),
+        );
+        await get(`${API}/pending`);
+        expect(
+            await store.getDays(OWNER_ID, "2026-01-01", "2026-12-31"),
+        ).toEqual([]);
     });
 });
 
 describe("POST /ack", () => {
-    const meals = [
-        { logged_at: "2026-10-02T06:00:00Z", calories: 600, protein_g: 30 },
-    ] as unknown as Partial<HealthSyncMeal>[];
-
-    test("is idempotent, and done releases the lease", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        const p = (await (
-            await ctx.req("/api/v1/health-sync/pending", { token })
-        ).json()) as {
-            lease_until: string;
-            entries: { entry_id: string; date: string; values: object }[];
-        };
-        const entry = p.entries[0]!;
-        expect(ctx.links.get(USER)!.row.lease_until).not.toBeNull();
-
-        const ack = (done: boolean) =>
-            ctx.req("/api/v1/health-sync/ack", {
-                method: "POST",
-                token,
-                body: {
-                    entries: [
-                        {
-                            entry_id: entry.entry_id,
-                            date: entry.date,
-                            values: entry.values,
-                        },
-                    ],
-                    done,
-                    lease_until: p.lease_until,
-                },
-            });
-        const first = await ack(false);
-        expect(first.status).toBe(200);
-        expect(await first.json()).toEqual({
+    test("applies the offered entry; sent-so-far moves and last_ack_at is stamped", async () => {
+        await eat("2026-10-03T05:00:00Z", 450, { protein_g: 20 });
+        const { a } = await syncOnce();
+        expect(a).toMatchObject({
             ok: true,
             applied: 1,
             skipped: 0,
+            results: [{ entry_id: "2026-10-03:r1", status: "applied" }],
         });
-        // Not done: the lease is still held.
-        expect(ctx.links.get(USER)!.row.lease_until).not.toBeNull();
-        const day = ctx.days.get(`${USER}|2026-10-02`)!;
-        expect(day.sent_values).toEqual({ energy_kcal: 600, protein_g: 30 });
-        expect(day.offer_count).toBe(0);
-        expect(day.timezone).toBe(KYIV);
-        expect(ctx.links.get(USER)!.row.last_sync_at).toBe(
-            new Date(NOW).toISOString(),
+        const [day] = await store.getDays(OWNER_ID, "2026-10-03", "2026-10-03");
+        expect(day).toMatchObject({
+            rounds: 1,
+            timezone: "Europe/Kyiv",
+            sent: { energy_kcal: 450, protein_g: 20 },
+        });
+        expect((await store.getState(OWNER_ID)).last_ack_at).toBe(
+            new Date(T0).toISOString(),
         );
-
-        const second = await ack(true);
-        expect(await second.json()).toEqual({
-            ok: true,
-            applied: 0,
-            skipped: 1,
-        });
-        expect(ctx.links.get(USER)!.row.lease_until).toBeNull();
-
-        // Nothing left to offer.
-        const again = (await (
-            await ctx.req("/api/v1/health-sync/pending", { token })
-        ).json()) as { entries: unknown[]; status: { synced_through: string } };
-        expect(again.entries).toEqual([]);
-        expect(again.status.synced_through).toBe("2026-10-02");
+        expect((await store.getState(OWNER_ID)).lease_until).toBeNull();
     });
 
-    test("applies two top-ups for one day from one batch, in order", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        ctx.days.set(`${USER}|2026-10-02`, {
-            user_id: USER,
-            date: "2026-10-02",
-            timezone: KYIV,
-            sent_values: { energy_kcal: 500 },
-            topup_seq: 0,
-            offer_count: 0,
-            notified: {},
-            first_sent_at: "2026-10-03T03:00:00.000Z",
-            last_sent_at: "2026-10-03T03:00:00.000Z",
+    test("a replayed ack is idempotent: skipped, ledger unchanged", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        const p = await json(await get(`${API}/pending`));
+        const body = {
+            entries: [
+                {
+                    entry_id: "2026-10-03:r1",
+                    date: "2026-10-03",
+                    values: p.entries[0].values,
+                },
+            ],
+            done: false,
+        };
+        expect((await json(await post(`${API}/ack`, body))).applied).toBe(1);
+        const again = await json(await post(`${API}/ack`, body));
+        expect(again).toMatchObject({
+            applied: 0,
+            skipped: 1,
+            results: [{ status: "skipped" }],
         });
-        const r = await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            token,
-            body: {
+        const [day] = await store.getDays(OWNER_ID, "2026-10-03", "2026-10-03");
+        expect(day!.sent.energy_kcal).toBe(450);
+        expect(day!.rounds).toBe(1);
+    });
+
+    test("two overlapping identical acks count exactly once", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        const p = await json(await get(`${API}/pending`));
+        const body = {
+            entries: [
+                {
+                    entry_id: "2026-10-03:r1",
+                    date: "2026-10-03",
+                    values: p.entries[0].values,
+                },
+            ],
+        };
+        const [a, b] = await Promise.all([
+            post(`${API}/ack`, body),
+            post(`${API}/ack`, body),
+        ]);
+        const applied = [(await json(a)).applied, (await json(b)).applied];
+        expect(applied.sort()).toEqual([0, 1]);
+        const [day] = await store.getDays(OWNER_ID, "2026-10-03", "2026-10-03");
+        expect(day!.sent.energy_kcal).toBe(450);
+    });
+
+    test("r1 and r2 for one day in one batch both apply, in order", async () => {
+        const r = await json(
+            await post(`${API}/ack`, {
                 entries: [
                     {
-                        entry_id: "2026-10-02:t1",
-                        date: "2026-10-02",
+                        entry_id: "2026-10-03:r1",
+                        date: "2026-10-03",
                         values: { energy_kcal: 100 },
                     },
                     {
-                        entry_id: "2026-10-02:t2",
-                        date: "2026-10-02",
+                        entry_id: "2026-10-03:r2",
+                        date: "2026-10-03",
                         values: { energy_kcal: 50 },
                     },
-                ],
-            },
-        });
-        expect(await r.json()).toEqual({ ok: true, applied: 2, skipped: 0 });
-        const day = ctx.days.get(`${USER}|2026-10-02`)!;
-        expect(day.sent_values).toEqual({ energy_kcal: 650 });
-        expect(day.topup_seq).toBe(2);
-    });
-
-    test("refuses a field the link does not send, and other bad bodies", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        for (const body of [
-            {
-                entries: [
                     {
-                        entry_id: "2026-10-02:i",
-                        date: "2026-10-02",
-                        values: { water_ml: 500 },
+                        entry_id: "2026-10-03:r4",
+                        date: "2026-10-03",
+                        values: { energy_kcal: 9 },
                     },
                 ],
-            },
-            {
-                entries: [
-                    {
-                        entry_id: "2026-10-02:i",
-                        date: "2026-10-02",
-                        values: { energy_kcal: -1 },
-                    },
-                ],
-            },
-            {
-                entries: Array.from({ length: 21 }, () => ({
-                    entry_id: "2026-10-02:i",
-                    date: "2026-10-02",
-                    values: { energy_kcal: 1 },
-                })),
-            },
-            "{",
-        ]) {
-            const r = await ctx.req("/api/v1/health-sync/ack", {
-                method: "POST",
-                token,
-                body,
-            });
-            expect(r.status).toBe(400);
-            expect(((await r.json()) as { error: string }).error).toBe(
-                "bad_request",
-            );
-        }
-        expect(ctx.calls).not.toContain("insertDays");
-        expect(ctx.calls).not.toContain("updateDay");
-    });
-
-    test("a store failure is unavailable with a ref", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        ctx.days.set(`${USER}|2026-10-02`, offeredRow("2026-10-02"));
-        ctx.fail.add("updateDay");
-        const r = await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            token,
-            body: {
-                entries: [
-                    {
-                        entry_id: "2026-10-02:i",
-                        date: "2026-10-02",
-                        values: { energy_kcal: 10 },
-                    },
-                ],
-            },
-        });
-        expect(r.status).toBe(503);
-        expect(((await r.json()) as { error: string }).error).toBe(
-            "unavailable",
+            }),
         );
-    });
-});
-
-describe("POST /ack: bounds and concurrency", () => {
-    const meals = [
-        { logged_at: "2026-10-02T06:00:00Z", calories: 600, protein_g: 30 },
-    ] as unknown as Partial<HealthSyncMeal>[];
-    const ack = (ctx: Ctx, token: string, body: unknown) =>
-        ctx.req("/api/v1/health-sync/ack", { method: "POST", token, body });
-    const initial = (date: string) => ({
-        entry_id: `${date}:i`,
-        date,
-        values: { energy_kcal: 1 },
+        expect(r.results.map((x: any) => x.status)).toEqual([
+            "applied",
+            "applied",
+            "skipped",
+        ]);
+        const [day] = await store.getDays(OWNER_ID, "2026-10-03", "2026-10-03");
+        expect(day).toMatchObject({ rounds: 2, sent: { energy_kcal: 150 } });
     });
 
-    test("only dates /pending could have offered are applied", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        // Even a row that exists (however it got there) outside the window
-        // is not written: future days, and days older than the window.
-        for (const d of ["2030-01-01", "2026-10-03", "2026-09-20"]) {
-            ctx.days.set(`${USER}|${d}`, offeredRow(d));
-        }
-        const r = await ack(ctx, token, {
-            entries: [
-                initial("2030-01-01"),
-                initial("2030-01-02"),
-                // Today: not closed yet.
-                initial("2026-10-03"),
-                // Before the window (lastClosed − 7 is 2026-09-25).
-                initial("2026-09-20"),
-            ],
-        });
-        expect(await r.json()).toEqual({ ok: true, applied: 0, skipped: 4 });
-        expect(ctx.days.has(`${USER}|2030-01-02`)).toBe(false);
-        for (const d of ["2030-01-01", "2026-10-03", "2026-09-20"]) {
-            expect(ctx.days.get(`${USER}|${d}`)!.sent_values).toBeNull();
-        }
-        expect(ctx.calls).not.toContain("updateDay");
-    });
-
-    test("a day that was never offered (no row) is skipped", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        const r = await ack(ctx, token, { entries: [initial("2026-10-01")] });
-        expect(await r.json()).toEqual({ ok: true, applied: 0, skipped: 1 });
-        expect(ctx.days.size).toBe(0);
-    });
-
-    test("the day that slid out of the window at 05:00 is still taken", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx, { sync_start_date: "2026-09-01" });
-        // At 12:00Z on Oct 3 the window is Sep 26 – Oct 2; Sep 25 was its
-        // first day until 05:00 this morning.
-        ctx.days.set(`${USER}|2026-09-25`, offeredRow("2026-09-25"));
-        const r = await ack(ctx, token, { entries: [initial("2026-09-25")] });
-        expect(await r.json()).toEqual({ ok: true, applied: 1, skipped: 0 });
-    });
-
-    test("nothing before the link's start date", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx, { sync_start_date: "2026-10-02" });
-        ctx.days.set(`${USER}|2026-10-01`, offeredRow("2026-10-01"));
-        const r = await ack(ctx, token, { entries: [initial("2026-10-01")] });
-        expect(await r.json()).toEqual({ ok: true, applied: 0, skipped: 1 });
-    });
-
-    test("done frees only the lease this run holds", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        const a = (await (
-            await ctx.req("/api/v1/health-sync/pending", { token })
-        ).json()) as { lease_until: string };
-        // Run A's lease lapses; run B takes a new one.
-        ctx.setClock(NOW + 150_000);
-        const b = (await (
-            await ctx.req("/api/v1/health-sync/pending", { token })
-        ).json()) as { lease_until: string };
-        expect(b.lease_until).not.toBe(a.lease_until);
-        // A's late done does not free B's lease...
-        await ack(ctx, token, {
-            entries: [],
-            done: true,
-            lease_until: a.lease_until,
-        });
-        expect(ctx.links.get(USER)!.row.lease_until).toBe(b.lease_until);
-        // ...and neither does a done that names no lease.
-        await ack(ctx, token, { entries: [], done: true });
-        expect(ctx.links.get(USER)!.row.lease_until).toBe(b.lease_until);
-        const busy = await ctx.req("/api/v1/health-sync/pending", { token });
-        expect(busy.status).toBe(409);
-        // B's own done does.
-        await ack(ctx, token, {
-            entries: [],
-            done: true,
-            lease_until: b.lease_until,
-        });
-        expect(ctx.links.get(USER)!.row.lease_until).toBeNull();
-    });
-
-    test("an ack landing between /pending's read and write is not undone", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        // Run A was offered Oct 2 and its lease lapsed before it acked.
-        await ctx.req("/api/v1/health-sync/pending", { token });
-        ctx.setClock(NOW + 150_000);
-        // Run B reads the ledger; A's ack lands before B writes.
-        const realGetDays = ctx.store.getDays.bind(ctx.store);
-        let fired = false;
-        ctx.store.getDays = async (u, f, t) => {
-            const rows = await realGetDays(u, f, t);
-            if (!fired) {
-                fired = true;
-                const r = await ack(ctx, token, {
-                    entries: [
-                        {
-                            entry_id: "2026-10-02:i",
-                            date: "2026-10-02",
-                            values: { energy_kcal: 600, protein_g: 30 },
-                        },
-                    ],
-                });
-                expect(await r.json()).toMatchObject({ applied: 1 });
-            }
-            return rows;
-        };
-        const b = (await (
-            await ctx.req("/api/v1/health-sync/pending", { token })
-        ).json()) as { entries: unknown[] };
-        // B does not offer the day again, and A's ack stands.
-        expect(b.entries).toEqual([]);
-        const day = ctx.days.get(`${USER}|2026-10-02`)!;
-        expect(day.sent_values).toEqual({ energy_kcal: 600, protein_g: 30 });
-        expect(day.offer_count).toBe(0);
-    });
-
-    test("an ack whose day moved on in between counts as skipped", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        ctx.days.set(`${USER}|2026-10-02`, offeredRow("2026-10-02"));
-        const realGetDays = ctx.store.getDays.bind(ctx.store);
-        ctx.store.getDays = async (u, f, t) => {
-            const rows = await realGetDays(u, f, t);
-            // Another run's ack of the same initial lands first.
-            ctx.days.get(`${USER}|2026-10-02`)!.sent_values = {
-                energy_kcal: 5,
-            };
-            return rows;
-        };
-        const r = await ack(ctx, token, { entries: [initial("2026-10-02")] });
-        expect(await r.json()).toEqual({ ok: true, applied: 0, skipped: 1 });
-        expect(ctx.days.get(`${USER}|2026-10-02`)!.sent_values).toEqual({
-            energy_kcal: 5,
-        });
-        expect(ctx.calls).not.toContain("setLastSync");
-    });
-});
-
-describe("GET /pending: stuck days", () => {
-    const meals = [
-        { logged_at: "2026-10-02T06:00:00Z", calories: 600 },
-    ] as unknown as Partial<HealthSyncMeal>[];
-    const pending = async (ctx: Ctx, token: string, query = "") =>
-        (await (
-            await ctx.req(`/api/v1/health-sync/pending${query}`, { token })
-        ).json()) as {
-            entries: { entry_id: string }[];
-            notices: string[];
-            lease_until: string;
-        };
-
-    test("a stuck day comes back on a run started by hand", async () => {
-        const ctx = setup({ meals });
-        const token = seedLink(ctx);
-        // Three automation runs whose writes Health refused: nothing acked.
-        let clock = NOW;
-        for (let i = 0; i < 3; i++) {
-            const p = await pending(ctx, token);
-            expect(p.entries.map((e) => e.entry_id)).toEqual(["2026-10-02:i"]);
-            clock += 150_000;
-            ctx.setClock(clock);
-        }
-        const stuck = await pending(ctx, token);
-        expect(stuck.entries).toEqual([]);
-        expect(stuck.notices).toHaveLength(1);
-        expect(stuck.notices[0]).toContain("Sharing → Apps → Shortcuts");
-        clock += 150_000;
-        ctx.setClock(clock);
-        // Automations stay quiet about it.
-        const auto = await pending(ctx, token);
-        expect(auto.entries).toEqual([]);
-        expect(auto.notices).toEqual([]);
-        clock += 150_000;
-        ctx.setClock(clock);
-        // The user fixes the permission and runs Sync now.
-        const manual = await pending(ctx, token, "?mode=manual");
-        expect(manual.entries.map((e) => e.entry_id)).toEqual(["2026-10-02:i"]);
-        const r = await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            token,
-            body: {
+    test("dates outside the window (future, long gone) are skipped and write nothing", async () => {
+        const r = await json(
+            await post(`${API}/ack`, {
                 entries: [
                     {
-                        entry_id: "2026-10-02:i",
-                        date: "2026-10-02",
-                        values: { energy_kcal: 600 },
+                        entry_id: "2026-10-04:r1",
+                        date: "2026-10-04",
+                        values: { energy_kcal: 100 },
+                    },
+                    {
+                        entry_id: "2026-09-01:r1",
+                        date: "2026-09-01",
+                        values: { energy_kcal: 100 },
+                    },
+                    {
+                        entry_id: "2026-09-26:r1",
+                        date: "2026-09-26",
+                        values: { energy_kcal: 100 },
                     },
                 ],
-                done: true,
-                lease_until: manual.lease_until,
-            },
-        });
-        expect(await r.json()).toMatchObject({ applied: 1 });
-        const day = ctx.days.get(`${USER}|2026-10-02`)!;
-        expect(day.sent_values).toEqual({ energy_kcal: 600 });
-        expect(day.offer_count).toBe(0);
-        expect(day.notified).toEqual({});
-    });
-});
-
-describe("unknown API paths", () => {
-    test("a wrong method or path answers in the envelope", async () => {
-        const ctx = setup();
-        const wrong = await ctx.req("/api/v1/health-sync/ack");
-        expect(wrong.status).toBe(405);
-        expect(wrong.headers.get("allow")).toBe("POST");
-        expect(wrong.headers.get("cache-control")).toBe("private, no-store");
-        expect(await wrong.json()).toMatchObject({
-            ok: false,
-            error: "bad_request",
-        });
-        const typo = await ctx.req("/api/v1/health-sync/pendng");
-        expect(typo.status).toBe(404);
-        expect(await typo.json()).toMatchObject({
-            ok: false,
-            error: "bad_request",
-            message: "Unknown endpoint.",
-        });
-        const root = await ctx.req("/api/v1/health-sync", { method: "POST" });
-        expect(root.status).toBe(404);
-        expect(lines()).toEqual([
-            "[health-sync] route=unknown result=bad_request",
-            "[health-sync] route=unknown result=bad_request",
-            "[health-sync] route=unknown result=bad_request",
+            }),
+        );
+        // Sep 26 is the one extra day an ack may reach back to.
+        expect(r.results.map((x: any) => x.status)).toEqual([
+            "skipped",
+            "skipped",
+            "applied",
         ]);
+        expect(
+            await store.getDays(OWNER_ID, "2026-01-01", "2026-12-31"),
+        ).toHaveLength(1);
     });
 
-    test("the real routes still win", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/pending");
-        expect(r.status).toBe(401);
-    });
-});
-
-describe("POST /revoke", () => {
-    test("deletes the link and its sent record", async () => {
-        const ctx = setup();
-        const token = seedLink(ctx);
-        ctx.days.set(`${USER}|2026-10-02`, {
-            user_id: USER,
-            date: "2026-10-02",
-            timezone: KYIV,
-            sent_values: { energy_kcal: 500 },
-            topup_seq: 0,
-            offer_count: 0,
-            notified: {},
-            first_sent_at: null,
-            last_sent_at: null,
+    test("a partial echo (the phone logged fewer fields) only moves those; the rest is offered again", async () => {
+        await eat("2026-10-03T05:00:00Z", 450, { protein_g: 20 });
+        const p = await json(await get(`${API}/pending`));
+        await post(`${API}/ack`, {
+            entries: [
+                {
+                    entry_id: p.entries[0].entry_id,
+                    date: "2026-10-03",
+                    values: { energy_kcal: 450 },
+                },
+            ],
+            done: true,
+            lease_until: p.lease_until,
         });
-        const r = await ctx.req("/api/v1/health-sync/revoke", {
-            method: "POST",
-            token,
+        const next = await json(await get(`${API}/pending`));
+        expect(next.entries[0]).toMatchObject({
+            entry_id: "2026-10-03:r2",
+            values: { protein_g: 20 },
         });
-        expect(r.status).toBe(200);
-        expect(await r.json()).toEqual({ ok: true });
-        expect(ctx.links.size).toBe(0);
-        expect(ctx.days.size).toBe(0);
-        const after = await ctx.req("/api/v1/health-sync/pending", { token });
-        expect(after.status).toBe(401);
-    });
-});
-
-describe("logging", () => {});
-
-describe("activity shortcut", () => {
-    const ACTIVITY_TOKEN = `nmhs_${"z".repeat(43)}`;
-
-    function seedActivityLink(ctx: Ctx, token = ACTIVITY_TOKEN) {
-        ctx.activityLinks.set(USER, {
-            token,
-            row: {
-                id: "activity-link-1",
-                user_id: USER,
-                fallback_tz: null,
-                created_at: "2026-09-25T10:00:00.000Z",
-                last_used_at: null,
-                last_sync_at: null,
-                expires_at: "2026-12-25T10:00:00.000Z",
-            },
-        });
-        return token;
-    }
-
-    test("each token works only on its own routes", async () => {
-        const ctx = setup();
-        const healthToken = seedLink(ctx);
-        const activityToken = seedActivityLink(ctx);
-        const body = {
-            tz: KYIV,
-            days: [{ date: "2026-10-03", active_kcal: 1 }],
-        };
-
-        const a = await ctx.req("/api/v1/health-sync/activity", {
-            method: "POST",
-            body,
-            token: healthToken,
-        });
-        expect(a.status).toBe(401);
-        const aj = (await a.json()) as { error: string; message: string };
-        expect(aj.error).toBe("invalid_token");
-        expect(aj.message).toContain(HEALTH_ACTIVITY_SHORTCUT_NAME);
-
-        const p = await ctx.req("/api/v1/health-sync/pending", {
-            token: activityToken,
-        });
-        expect(p.status).toBe(401);
-        const ack = await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            body: { entries: [], done: true },
-            token: activityToken,
-        });
-        expect(ack.status).toBe(401);
-        expect(ctx.writes).toHaveLength(0);
     });
 
-    test("writes today and the days before as day totals, skipping 0", async () => {
-        const ctx = setup({}, { creditPct: 50 });
-        const token = seedActivityLink(ctx);
-        // NOW is 15:00 on 2026-10-03 in Kyiv.
-        const r = await ctx.req("/api/v1/health-sync/activity", {
-            method: "POST",
-            token,
-            body: {
-                tz: "Europe/Berlin",
-                days: [
-                    { date: "2026-10-03", active_kcal: 412.4 },
-                    { date: "2026-10-02", active_kcal: "380" },
-                    { date: "2026-10-01", active_kcal: 0 },
+    test("done:true frees the lease only when it is still the caller's", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        const first = await json(await get(`${API}/pending`));
+        // Its lease lapses and a newer run takes over.
+        clock = T0 + 130_000;
+        const second = await json(await get(`${API}/pending`));
+        expect(second.lease_until).not.toBe(first.lease_until);
+        // A late ack from the first run must not free the second run's lease.
+        await post(`${API}/ack`, {
+            done: true,
+            lease_until: first.lease_until,
+        });
+        expect((await get(`${API}/pending`)).status).toBe(409);
+        await post(`${API}/ack`, {
+            done: true,
+            lease_until: second.lease_until,
+        });
+        expect((await store.getState(OWNER_ID)).lease_until).toBeNull();
+    });
+
+    test.each([
+        ["not JSON", "{nope", /must be JSON/],
+        ["not an object", "[]", /JSON object/],
+        [
+            "unknown field",
+            {
+                entries: [
+                    {
+                        entry_id: "2026-10-03:r1",
+                        date: "2026-10-03",
+                        values: { sugar_g: 3 },
+                    },
                 ],
             },
+            /not a field/,
+        ],
+        [
+            "over the cap",
+            {
+                entries: [
+                    {
+                        entry_id: "2026-10-03:r1",
+                        date: "2026-10-03",
+                        values: { energy_kcal: 60000 },
+                    },
+                ],
+            },
+            /0 to 50000/,
+        ],
+        [
+            "old entry id shape",
+            {
+                entries: [
+                    {
+                        entry_id: "2026-10-03:i",
+                        date: "2026-10-03",
+                        values: { energy_kcal: 5 },
+                    },
+                ],
+            },
+            /entry_id/,
+        ],
+    ])("refuses a malformed body: %s", async (_n, body, message) => {
+        const r = await post(`${API}/ack`, body);
+        expect(r.status).toBe(400);
+        const j = await json(r);
+        expect(j).toMatchObject({ ok: false, error: "bad_request" });
+        expect(j.message).toMatch(message);
+        expect(
+            await store.getDays(OWNER_ID, "2026-01-01", "2026-12-31"),
+        ).toEqual([]);
+    });
+});
+
+describe("only the new delta flows, hour after hour", () => {
+    test("pending → ack → pending is empty → more food → only the delta", async () => {
+        await eat("2026-10-03T05:00:00Z", 450, { protein_g: 20 });
+        const first = await syncOnce();
+        expect(first.p.entries[0].values).toEqual({
+            energy_kcal: 450,
+            protein_g: 20,
         });
-        expect(r.status).toBe(200);
-        const b = (await r.json()) as Record<string, unknown>;
-        expect(b).toMatchObject({
+        expect((await json(await get(`${API}/pending`))).count).toBe(0);
+
+        clock = T0 + 3_600_000;
+        await eat("2026-10-03T07:30:00Z", 600, { protein_g: 35 });
+        const second = await syncOnce();
+        expect(second.p.entries).toHaveLength(1);
+        expect(second.p.entries[0]).toMatchObject({
+            entry_id: "2026-10-03:r2",
+            values: { energy_kcal: 600, protein_g: 35 },
+        });
+        expect((await json(await get(`${API}/pending`))).count).toBe(0);
+        const [day] = await store.getDays(OWNER_ID, "2026-10-03", "2026-10-03");
+        expect(day).toMatchObject({
+            rounds: 2,
+            sent: { energy_kcal: 1050, protein_g: 55 },
+        });
+    });
+
+    test("food logged below the threshold waits until it adds up", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        await syncOnce();
+        clock += 3_600_000;
+        await eat("2026-10-03T06:30:00Z", 12);
+        expect((await json(await get(`${API}/pending`))).count).toBe(0);
+        await eat("2026-10-03T06:45:00Z", 10);
+        const r = await json(await get(`${API}/pending`));
+        expect(r.entries[0].values).toEqual({ energy_kcal: 22 });
+    });
+
+    test("yesterday's late entry is picked up as a final top-up once its day has closed", async () => {
+        await eat("2026-10-02T10:00:00Z", 1800);
+        const day1 = await syncOnce();
+        expect(day1.p.entries[0]).toMatchObject({
+            date: "2026-10-02",
+            closed: true,
+        });
+        await eat("2026-10-02T12:00:00Z", 8); // forgotten snack, logged later
+        const r = await json(await get(`${API}/pending`));
+        expect(r.entries[0]).toMatchObject({
+            entry_id: "2026-10-02:r2",
+            closed: true,
+            sample_at: "2026-10-02T23:59:00+03:00",
+            values: { energy_kcal: 8 },
+        });
+    });
+
+    test("the 05:00 boundary: the same small delta is held at 04:59:59 and sent at 05:00:00", async () => {
+        clock = Date.parse("2026-10-03T01:59:59Z"); // 04:59:59 Kyiv, Oct 2 still open
+        await eat("2026-10-02T10:00:00Z", 1800);
+        await syncOnce();
+        await eat("2026-10-02T12:00:00Z", 8);
+        expect((await json(await get(`${API}/pending`))).count).toBe(0);
+        clock = Date.parse("2026-10-03T02:00:00Z");
+        const r = await json(await get(`${API}/pending`));
+        expect(r.count).toBe(1);
+        expect(r.entries[0].closed).toBe(true);
+    });
+
+    test("DST fall-back (Kyiv, Oct 25): days bucket and close by local time", async () => {
+        // 03:00Z Oct 25 = 05:00 EET: Oct 24 just closed. Food at 22:30Z Oct 24 is 00:30 Oct 25 EET.
+        clock = Date.parse("2026-10-25T09:00:00Z");
+        await eat("2026-10-24T20:30:00Z", 700); // 23:30 EEST Oct 24
+        await eat("2026-10-24T22:30:00Z", 300); // 00:30 EET Oct 25
+        const r = await json(await get(`${API}/pending`));
+        const byDate = Object.fromEntries(
+            r.entries.map((e: any) => [e.date, e]),
+        );
+        expect(byDate["2026-10-24"].values.energy_kcal).toBe(700);
+        expect(byDate["2026-10-24"].sample_at).toBe(
+            "2026-10-24T23:59:00+03:00",
+        );
+        expect(byDate["2026-10-25"].values.energy_kcal).toBe(300);
+        expect(byDate["2026-10-25"].sample_at).toBe(
+            "2026-10-25T11:00:00+02:00",
+        );
+        expect(r.window).toEqual({ from: "2026-10-19", to: "2026-10-25" });
+    });
+
+    test("DST spring-forward (New York, Mar 8 2026): the 23-hour day buckets correctly", async () => {
+        await upsertProfile(OWNER_ID, { timezone: "America/New_York" });
+        clock = Date.parse("2026-03-09T16:00:00Z"); // 12:00 EDT Mar 9
+        await eat("2026-03-08T04:30:00Z", 200); // 23:30 EST Mar 7
+        await eat("2026-03-08T05:30:00Z", 300); // 00:30 EST Mar 8
+        await eat("2026-03-09T03:30:00Z", 400); // 23:30 EDT Mar 8 (the short day)
+        const r = await json(await get(`${API}/pending`));
+        const v = Object.fromEntries(
+            r.entries.map((e: any) => [e.date, e.values.energy_kcal]),
+        );
+        expect(v).toEqual({ "2026-03-07": 200, "2026-03-08": 700 });
+    });
+
+    test("after local midnight the new day is today and yesterday is a closed-or-open day by the clock", async () => {
+        clock = Date.parse("2026-10-03T21:10:00Z"); // 00:10 Oct 4 Kyiv: Oct 3 is NOT closed yet
+        await eat("2026-10-03T18:00:00Z", 500);
+        const r = await json(await get(`${API}/pending`));
+        expect(r.entries[0]).toMatchObject({
+            date: "2026-10-03",
+            closed: false,
+            sample_at: "2026-10-03T23:59:00+03:00",
+        });
+        expect(r.window.to).toBe("2026-10-04");
+    });
+});
+
+describe("POST /activity", () => {
+    const send = (days: unknown, extra: object = {}) =>
+        post(`${API}/activity`, { days, ...extra });
+
+    test("writes the day totals, reports what changed, and stamps the activity clock", async () => {
+        const r = await json(
+            await send([
+                { date: "2026-10-03", active_kcal: 512.4 },
+                { date: "2026-10-02", active_kcal: "640" },
+            ]),
+        );
+        expect(r).toMatchObject({
             ok: true,
-            timezone: KYIV,
-            timezone_source: "profile",
+            version: 1,
+            timezone: "Europe/Kyiv",
             written: 2,
             changed: 2,
-            skipped: [{ date: "2026-10-01", reason: "zero" }],
+            skipped: [],
             status: { through: "2026-10-03" },
         });
-        expect(ctx.writes).toEqual([
-            {
-                userId: USER,
-                days: [
-                    {
-                        date: "2026-10-02",
-                        kcal: 380,
-                        // Local noon in Kyiv (UTC+3).
-                        logged_at: "2026-10-02T09:00:00.000Z",
-                        credit_pct: 50,
-                    },
-                    {
-                        date: "2026-10-03",
-                        kcal: 412,
-                        logged_at: "2026-10-03T09:00:00.000Z",
-                        credit_pct: 50,
-                    },
-                ],
-            },
+        const rows = await getAllActiveCalories(OWNER_ID);
+        expect(rows.map((x) => [x.source_date, x.kcal, x.source])).toEqual([
+            ["2026-10-02", 640, "apple_health"],
+            ["2026-10-03", 512, "apple_health"],
         ]);
-        const link = ctx.activityLinks.get(USER)!.row;
-        expect(link.last_sync_at).toBe(new Date(NOW).toISOString());
-        expect(link.fallback_tz).toBe("Europe/Berlin");
-        expect(lines()).toContain(
-            "[health-sync] route=activity result=ok entries=2",
+        expect((await store.getState(OWNER_ID)).last_activity_at).toBe(
+            new Date(T0).toISOString(),
         );
     });
 
-    test("without a profile zone the phone's zone decides the dates", async () => {
-        const ctx = setup({}, { tz: null });
-        const token = seedActivityLink(ctx);
-        const r = await ctx.req("/api/v1/health-sync/activity", {
-            method: "POST",
-            token,
-            body: {
-                tz: "America/Los_Angeles",
-                days: [{ date: "2026-10-03", active_kcal: 100 }],
-            },
-        });
-        const b = (await r.json()) as Record<string, unknown>;
-        expect(b).toMatchObject({
-            timezone: "America/Los_Angeles",
-            timezone_source: "phone",
-        });
-        // 05:00 in Los Angeles: 2026-10-03 is today there.
-        expect(ctx.writes[0]!.days[0]!.logged_at).toBe(
-            "2026-10-03T19:00:00.000Z",
+    test("REPLACES a day's total on every sync, never adds; an unchanged resend changes nothing", async () => {
+        await send([{ date: "2026-10-03", active_kcal: 300 }]);
+        const grown = await json(
+            await send([{ date: "2026-10-03", active_kcal: 450 }]),
         );
+        expect(grown.changed).toBe(1);
+        expect(
+            (await getAllActiveCalories(OWNER_ID)).map((x) => x.kcal),
+        ).toEqual([450]);
+        const same = await json(
+            await send([{ date: "2026-10-03", active_kcal: 450 }]),
+        );
+        expect(same).toMatchObject({ written: 1, changed: 0 });
+        expect(await getAllActiveCalories(OWNER_ID)).toHaveLength(1);
     });
 
-    test("future, too old and implausible days are skipped, not refused", async () => {
-        const ctx = setup();
-        const token = seedActivityLink(ctx);
-        const r = await ctx.req("/api/v1/health-sync/activity", {
-            method: "POST",
-            token,
-            body: {
-                tz: KYIV,
-                days: [
-                    { date: "2026-10-04", active_kcal: 10 },
-                    { date: "2026-09-26", active_kcal: 10 },
-                    { date: "2026-09-27", active_kcal: 10 },
-                    { date: "2026-10-03", active_kcal: 10001 },
-                ],
-            },
+    test("manual entries are preserved beside the synced total", async () => {
+        await insertActiveCalories(OWNER_ID, {
+            kcal: 200,
+            credit_pct: 100,
+            logged_at: "2026-10-03T08:00:00.000Z",
         });
-        expect(r.status).toBe(200);
-        const b = (await r.json()) as {
-            skipped: unknown;
-            written: number;
-            status: unknown;
-        };
-        expect(b.written).toBe(1);
-        expect(ctx.writes[0]!.days.map((d) => d.date)).toEqual(["2026-09-27"]);
-        expect(b.skipped).toEqual([
+        await send([{ date: "2026-10-03", active_kcal: 600 }]);
+        await send([{ date: "2026-10-03", active_kcal: 650 }]);
+        const rows = await getAllActiveCalories(OWNER_ID);
+        expect(rows).toHaveLength(2);
+        expect(rows.find((r) => r.source === null)!.kcal).toBe(200);
+        expect(rows.find((r) => r.source === "apple_health")!.kcal).toBe(650);
+    });
+
+    test("only today and the six days before; a zero writes nothing; too-high skipped", async () => {
+        const r = await json(
+            await send([
+                { date: "2026-10-04", active_kcal: 100 },
+                { date: "2026-09-26", active_kcal: 100 },
+                { date: "2026-09-27", active_kcal: 100 },
+                { date: "2026-10-01", active_kcal: 0 },
+                { date: "2026-10-02", active_kcal: 99999 },
+            ]),
+        );
+        expect(r.written).toBe(1);
+        expect(r.skipped).toEqual([
             { date: "2026-09-26", reason: "outside_window" },
-            { date: "2026-10-03", reason: "too_high" },
+            { date: "2026-10-01", reason: "zero" },
+            { date: "2026-10-02", reason: "too_high" },
             { date: "2026-10-04", reason: "outside_window" },
         ]);
-        expect(b.status).toEqual({ through: "2026-10-03" });
+        expect(
+            (await getAllActiveCalories(OWNER_ID)).map((x) => x.source_date),
+        ).toEqual(["2026-09-27"]);
     });
 
-    test("a malformed body is a 400 with a message the shortcut can show", async () => {
-        const ctx = setup();
-        const token = seedActivityLink(ctx);
-        for (const body of [
-            '{"tz":Europe/Kyiv}',
-            { tz: KYIV },
-            { tz: KYIV, days: [] },
-            { tz: KYIV, days: [{ date: "02.10.2026", active_kcal: 1 }] },
-            { tz: KYIV, days: [{ date: "2026-10-02", active_kcal: "1,234" }] },
-            { tz: KYIV, days: [{ date: "2026-10-02", active_kcal: -1 }] },
+    test("a day sent twice keeps its last value; the credit snapshot of an existing day is kept", async () => {
+        await upsertProfile(OWNER_ID, { activity_credit_pct: 60 });
+        await send([
+            { date: "2026-10-03", active_kcal: 100 },
+            { date: "2026-10-03", active_kcal: 120 },
+        ]);
+        await upsertProfile(OWNER_ID, { activity_credit_pct: 100 });
+        await send([{ date: "2026-10-03", active_kcal: 140 }]);
+        const [row] = await getAllActiveCalories(OWNER_ID);
+        expect(row).toMatchObject({ kcal: 140, credit_pct: 60 });
+    });
+
+    test.each([
+        ["no days", {}, /days must be a list/],
+        ["empty days", { days: [] }, /days must be a list/],
+        [
+            "bad date",
+            { days: [{ date: "03/10/2026", active_kcal: 5 }] },
+            /YYYY-MM-DD/,
+        ],
+        [
+            "negative",
+            { days: [{ date: "2026-10-03", active_kcal: -5 }] },
+            /0 or more/,
+        ],
+        [
+            "not a number",
+            { days: [{ date: "2026-10-03", active_kcal: "lots" }] },
+            /number of kilocalories/,
+        ],
+        [
+            "too many",
             {
-                tz: KYIV,
                 days: Array.from({ length: 9 }, (_, i) => ({
-                    date: `2026-10-0${(i % 3) + 1}`,
+                    date: `2026-10-0${i + 1}`,
                     active_kcal: 1,
                 })),
             },
-        ]) {
-            const r = await ctx.req("/api/v1/health-sync/activity", {
-                method: "POST",
-                token,
-                body,
-            });
-            expect(r.status).toBe(400);
-            const b = (await r.json()) as { ok: boolean; message: string };
-            expect(b.ok).toBe(false);
-            expect(b.message.length).toBeGreaterThan(10);
-        }
-        expect(ctx.writes).toHaveLength(0);
+            /at most 8/,
+        ],
+    ])("refuses a malformed body: %s", async (_n, body, message) => {
+        const r = await post(`${API}/activity`, body);
+        expect(r.status).toBe(400);
+        expect((await json(r)).message).toMatch(message);
+        expect(await getAllActiveCalories(OWNER_ID)).toEqual([]);
     });
 
-    test("a write failure is unavailable with a ref", async () => {
-        const ctx = setup();
-        const token = seedActivityLink(ctx);
-        ctx.activityFail.add("write");
-        const r = await ctx.req("/api/v1/health-sync/activity", {
-            method: "POST",
-            token,
-            body: { tz: KYIV, days: [{ date: "2026-10-03", active_kcal: 5 }] },
+    test("does not touch the nutrition ledger", async () => {
+        await send([{ date: "2026-10-03", active_kcal: 300 }]);
+        expect(
+            await store.getDays(OWNER_ID, "2026-01-01", "2026-12-31"),
+        ).toEqual([]);
+    });
+});
+
+describe("GET /status and POST /revoke", () => {
+    test("status carries the clocks and the per-day sent / logged / pending view", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        await syncOnce();
+        await eat("2026-10-03T06:00:00Z", 100);
+        await post(`${API}/activity`, {
+            days: [{ date: "2026-10-03", active_kcal: 250 }],
         });
-        expect(r.status).toBe(503);
-        const b = (await r.json()) as { error: string; ref: string };
-        expect(b.error).toBe("unavailable");
-        expect(b.ref).toMatch(/^[0-9a-f]{8}$/);
+        const s = await json(await get(`${API}/status`));
+        expect(s).toMatchObject({
+            ok: true,
+            timezone: "Europe/Kyiv",
+            last_sync_at: new Date(T0).toISOString(),
+            last_ack_at: new Date(T0).toISOString(),
+            last_activity_at: new Date(T0).toISOString(),
+            pending_entries: 1,
+            discrepancies: [],
+        });
+        expect(s.days).toHaveLength(7);
+        expect(s.days.at(-1)).toMatchObject({
+            date: "2026-10-03",
+            sent: { energy_kcal: 450 },
+            logged: { energy_kcal: 550 },
+            pending: { energy_kcal: 100 },
+            rounds: 1,
+        });
+        // status never takes the lease
+        expect((await store.getState(OWNER_ID)).lease_until).toBeNull();
     });
 
-    test("/revoke with the activity token removes only the activity link", async () => {
-        const ctx = setup();
-        const healthToken = seedLink(ctx);
-        const activityToken = seedActivityLink(ctx);
-        const r = await ctx.req("/api/v1/health-sync/revoke", {
-            method: "POST",
-            token: activityToken,
+    test("status shows discrepancies and includes water once water has been sent", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        await insertWater(OWNER_ID, {
+            amount_ml: 500,
+            logged_at: "2026-10-03T05:10:00Z",
         });
-        expect(r.status).toBe(200);
-        expect(ctx.activityLinks.size).toBe(0);
-        expect(ctx.links.get(USER)!.token).toBe(healthToken);
-
-        const h = await ctx.req("/api/v1/health-sync/revoke", {
-            method: "POST",
-            token: healthToken,
+        await syncOnce({ headers: {} }).catch(() => {});
+        await store.releaseLease(OWNER_ID);
+        const p = await json(await get(`${API}/pending?water=1`));
+        await post(`${API}/ack`, {
+            entries: p.entries.map((e: any) => ({
+                entry_id: e.entry_id,
+                date: e.date,
+                values: e.values,
+            })),
+            done: true,
+            lease_until: p.lease_until,
         });
-        expect(h.status).toBe(200);
-        expect(ctx.links.size).toBe(0);
+        const { getAllWater, deleteWater } = await import("./db/repo.js");
+        for (const w of await getAllWater(OWNER_ID))
+            await deleteWater(OWNER_ID, w.id);
+        const s = await json(await get(`${API}/status`));
+        expect(s.discrepancies.map((d: any) => d.field)).toContain("water_ml");
     });
 
-    test("the wrong method on /activity is a 405 in the envelope", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/activity");
-        expect(r.status).toBe(405);
-        expect(r.headers.get("allow")).toBe("POST");
+    test("revoke needs an explicit confirm, then forgets the ledger and the clocks", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        await syncOnce();
+        const refused = await post(`${API}/revoke`, {});
+        expect(refused.status).toBe(400);
+        expect(
+            (await store.getDays(OWNER_ID, "2026-01-01", "2026-12-31")).length,
+        ).toBe(1);
+        expect(
+            (await json(await post(`${API}/revoke`, { confirm: true }))).ok,
+        ).toBe(true);
+        expect(
+            await store.getDays(OWNER_ID, "2026-01-01", "2026-12-31"),
+        ).toEqual([]);
+        expect((await store.getState(OWNER_ID)).last_ack_at).toBeNull();
+        // the whole day is offered again from zero, as documented
+        expect(
+            (await json(await get(`${API}/pending`))).entries[0].entry_id,
+        ).toBe("2026-10-03:r1");
+    });
+});
+
+describe("the health-sync lines in the log", () => {
+    test("one line per call: route, result, counts; no secrets, no values", async () => {
+        await eat("2026-10-03T05:00:00Z", 450);
+        await get(`${API}/pending`);
+        await get(`${API}/pending`); // busy
+        await post(`${API}/ack`, "{bad");
+        const lines = [...logSpy.mock.calls, ...warnSpy.mock.calls]
+            .map((c) => c.map(String).join(" "))
+            .filter((l: string) => l.startsWith("[health-sync]"));
+        expect(lines).toEqual([
+            "[health-sync] route=pending result=ok entries=1 notices=0 discrepancies=0",
+            "[health-sync] route=pending result=busy",
+            "[health-sync] route=ack result=bad_request",
+        ]);
     });
 });
