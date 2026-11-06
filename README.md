@@ -59,7 +59,7 @@ See [.env.example](.env.example). The ones that matter:
 | Variable                         | Meaning                                                                                                                                    |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
 | `DATA_DIR`                       | Where everything lives (`nutrition.db`, `keys.json`, `exports/`). Default `./data`, `/data` in the container.                              |
-| `MCP_KEY`                        | The MCP path key (≥ 16 chars). Generated and persisted when unset.                                                                         |
+| `MCP_KEY`                        | The MCP path key (≥ 32 chars, letters, digits, `-`, `_`). Generated and persisted when unset.                                              |
 | `TRUST_PROXY`                    | `1` behind a reverse proxy you control: failure counting then uses the rightmost `X-Forwarded-For` entry. Otherwise the header is ignored. |
 | `PUBLIC_URL`                     | Public origin, used to build the export link the tool returns.                                                                             |
 | `USDA_API_KEY`, `OFF_USER_AGENT` | Food lookups. Open Food Facts requires a User-Agent with a contact.                                                                        |

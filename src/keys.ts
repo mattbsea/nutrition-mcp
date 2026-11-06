@@ -77,12 +77,33 @@ function writeKeys(file: string, keys: Record<string, unknown>): void {
     renameSync(tmp, file);
 }
 
+/** Minimum length and alphabet of a configured secret. The alphabet is the
+ *  URL-path-safe one (also what newSecret emits), so a key can never need
+ *  encoding, smuggle a "/" or "?", or be mangled by a proxy. */
+export const MIN_KEY_LENGTH = 32;
+const KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
+
 const isSecret = (v: unknown): v is string =>
     typeof v === "string" && v.length >= 16;
 
+/** Throws unless a user-supplied secret is long enough and path-safe. The
+ *  message never contains the value. */
+function assertStrongKey(name: string, value: string): void {
+    if (value.length < MIN_KEY_LENGTH) {
+        throw new Error(
+            `${name} must be at least ${MIN_KEY_LENGTH} characters (got ${value.length}); generate one with: openssl rand -base64 48 | tr '+/' '-_' | tr -d '=\\n'`,
+        );
+    }
+    if (!KEY_PATTERN.test(value)) {
+        throw new Error(
+            `${name} may only contain letters, digits, "-" and "_" (it is used in a URL path or header).`,
+        );
+    }
+}
+
 /**
  * Loads (creating on first run) the key file. `env` is injectable for tests.
- * An MCP_KEY shorter than 16 characters is refused: a weak secret in a public
+ * An MCP_KEY shorter than 32 characters or outside [A-Za-z0-9_-] is refused: a weak secret in a public
  * URL path is worse than a clear startup failure.
  */
 export function loadKeys(
@@ -99,14 +120,13 @@ export function loadKeys(
     }
 
     const fromEnv = env.MCP_KEY?.trim();
-    if (fromEnv !== undefined && fromEnv !== "" && fromEnv.length < 16) {
-        throw new Error("MCP_KEY must be at least 16 characters.");
-    }
+    if (fromEnv) assertStrongKey("MCP_KEY", fromEnv);
     let mcpKey: string;
     let generated = false;
     if (fromEnv) {
         mcpKey = fromEnv;
     } else if (isSecret(keys.mcp_key)) {
+        assertStrongKey("keys.json mcp_key", keys.mcp_key);
         mcpKey = keys.mcp_key;
     } else {
         mcpKey = newSecret(48);
@@ -116,18 +136,13 @@ export function loadKeys(
     }
 
     const shortcutEnv = env.SHORTCUT_KEY?.trim();
-    if (
-        shortcutEnv !== undefined &&
-        shortcutEnv !== "" &&
-        shortcutEnv.length < 16
-    ) {
-        throw new Error("SHORTCUT_KEY must be at least 16 characters.");
-    }
+    if (shortcutEnv) assertStrongKey("SHORTCUT_KEY", shortcutEnv);
     let shortcutKey: string;
     let shortcutGenerated = false;
     if (shortcutEnv) {
         shortcutKey = shortcutEnv;
     } else if (isSecret(keys.shortcut_key)) {
+        assertStrongKey("keys.json shortcut_key", keys.shortcut_key);
         shortcutKey = keys.shortcut_key;
     } else {
         shortcutKey = newSecret(48);

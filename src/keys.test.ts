@@ -58,7 +58,7 @@ describe("loadKeys", () => {
     });
 
     test("MCP_KEY wins and is never written to disk", () => {
-        const env = { MCP_KEY: "from-the-environment-key-123456" };
+        const env = { MCP_KEY: "from-the-environment-key-1234567" };
         const k = loadKeys(dir, env);
         expect(k.mcpKey).toBe(env.MCP_KEY);
         expect(k.mcpKeyFromEnv).toBe(true);
@@ -74,7 +74,7 @@ describe("loadKeys", () => {
             keysFilePath(dir),
             JSON.stringify({
                 ...file,
-                shortcut_key: "later-step-owns-this-field",
+                shortcut_key: "later-step-owns-this-field-0123456789",
             }),
         );
         const b = loadKeys(dir, {});
@@ -84,18 +84,63 @@ describe("loadKeys", () => {
             keysFilePath(dir),
             JSON.stringify({
                 mcp_key: a.mcpKey,
-                shortcut_key: "later-step-owns-this-field",
+                shortcut_key: "later-step-owns-this-field-0123456789",
             }),
         );
         loadKeys(dir, {});
-        expect(read().shortcut_key).toBe("later-step-owns-this-field");
+        expect(read().shortcut_key).toBe(
+            "later-step-owns-this-field-0123456789",
+        );
         expect(read().mcp_key).toBe(a.mcpKey);
     });
 
-    test("a too-short MCP_KEY is refused", () => {
+    test("a too-short MCP_KEY is refused, and the message never echoes the value", () => {
         expect(() => loadKeys(dir, { MCP_KEY: "short" })).toThrow(
-            /at least 16/,
+            /MCP_KEY must be at least 32/,
         );
+        // 31 characters: one short.
+        const thirtyOne = "a".repeat(31);
+        expect(() => loadKeys(dir, { MCP_KEY: thirtyOne })).toThrow(
+            /at least 32/,
+        );
+        try {
+            loadKeys(dir, { MCP_KEY: thirtyOne });
+        } catch (e) {
+            expect((e as Error).message).not.toContain(thirtyOne);
+        }
+        expect(() => loadKeys(dir, { MCP_KEY: "a".repeat(32) })).not.toThrow();
+    });
+
+    test.each([
+        ["a slash", "a".repeat(20) + "/" + "b".repeat(20)],
+        ["a question mark", "a".repeat(20) + "?" + "b".repeat(20)],
+        ["a space", "a".repeat(20) + " " + "b".repeat(20)],
+        ["a dot", "a".repeat(20) + "." + "b".repeat(20)],
+        ["a plus", "a".repeat(20) + "+" + "b".repeat(20)],
+        ["non-ASCII", "a".repeat(20) + "é" + "b".repeat(20)],
+    ])("a key containing %s is refused (MCP and shortcut)", (_n, bad) => {
+        expect(() => loadKeys(dir, { MCP_KEY: bad })).toThrow(
+            /MCP_KEY may only contain/,
+        );
+        expect(() => loadKeys(dir, { SHORTCUT_KEY: bad })).toThrow(
+            /SHORTCUT_KEY may only contain/,
+        );
+    });
+
+    test("a weak or unsafe key already stored in keys.json is refused, not silently replaced", () => {
+        writeFileSync(
+            join(dir, "keys.json"),
+            JSON.stringify({ mcp_key: "x".repeat(20) }),
+        );
+        expect(() => loadKeys(dir, {})).toThrow(
+            /keys.json mcp_key must be at least 32/,
+        );
+    });
+
+    test("generated keys satisfy the rule they enforce", () => {
+        const k = loadKeys(dir, {});
+        expect(k.mcpKey).toMatch(/^[A-Za-z0-9_-]{32,}$/);
+        expect(k.shortcutKey).toMatch(/^[A-Za-z0-9_-]{32,}$/);
     });
 
     test("a corrupt keys.json is an error, never a silent new key", () => {
@@ -124,7 +169,7 @@ describe("loadKeys", () => {
     });
 
     test("SHORTCUT_KEY wins and is never written to disk", () => {
-        const env = { SHORTCUT_KEY: "shortcut-from-the-environment-123" };
+        const env = { SHORTCUT_KEY: "shortcut-from-the-environment-12345" };
         const k = loadKeys(dir, env);
         expect(k.shortcutKey).toBe(env.SHORTCUT_KEY);
         expect(k.shortcutKeyFromEnv).toBe(true);
@@ -134,12 +179,12 @@ describe("loadKeys", () => {
 
     test("a too-short SHORTCUT_KEY is refused", () => {
         expect(() => loadKeys(dir, { SHORTCUT_KEY: "short" })).toThrow(
-            /SHORTCUT_KEY must be at least 16/,
+            /SHORTCUT_KEY must be at least 32/,
         );
     });
 
     test("the two keys must differ, from any source", () => {
-        const same = "one-secret-for-both-0123456789";
+        const same = "one-secret-for-both-0123456789-abcdefgh";
         expect(() =>
             loadKeys(dir, { MCP_KEY: same, SHORTCUT_KEY: same }),
         ).toThrow(/must be different secrets/);
