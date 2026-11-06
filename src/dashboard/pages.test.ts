@@ -262,7 +262,7 @@ describe("pages with seeded data", () => {
         expect(text).toMatch(/just now|min ago/);
         expect(text).toContain("Last data written");
         expect(text).toContain("never");
-        expect(text).toContain("Logged vs sent");
+        expect(text).toContain("Energy: logged vs sent");
         expect(text).toContain("Energy (kcal)");
     });
 

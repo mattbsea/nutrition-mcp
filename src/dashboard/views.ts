@@ -433,13 +433,13 @@ export function mealsDayBody(d: MealsDayData, q = ""): Raw {
     const next = shiftDate(d.date, 1);
     return html` <h1>Meals</h1>
         <form method="get" action="/meals" class="pager" role="search">
-            <label class="sr" for="q" hidden>Search meals</label>
             <input
                 id="q"
                 type="search"
                 name="q"
                 value="${q}"
                 placeholder="Search meals and notes"
+                aria-label="Search meals"
                 maxlength="100"
             />
             <button type="submit">Search</button>
@@ -702,46 +702,22 @@ export function healthBody(s: HealthSyncStatus, now: Date): Raw {
                   </section>`
                 : ""
         }
-        <section class="card" aria-labelledby="hdays">
-            <h2 id="hdays">
-                Logged vs sent (${longDate(s.window.from)} to
-                ${longDate(s.window.to)})
-            </h2>
-            ${
-                s.days.length
-                    ? html`<div class="scroll">
-                              <table>
-                                  <thead>
-                                      <tr>
-                                          <th>Day</th>
-                                          ${fields.map((f) => html`<th class="num">${FIELD_LABEL[f]}</th>`)}
-                                          <th class="num">Sent</th>
-                                      </tr>
-                                  </thead>
-                                  <tbody>
-                                      ${s.days.map(
-                                          (d) =>
-                                              html`<tr>
-                                                  <td>
-                                                      ${longDate(d.date)}${d.closed ? "" : html` <span class="tag">today's window</span>`}
-                                                  </td>
-                                                  ${fields.map((f) => html`<td class="num"><span title="logged">${cell(d.logged[f])}</span> <span class="muted" title="sent to Health">/ ${cell(d.sent[f])}</span></td>`)}
-                                                  <td class="num">
-                                                      ${d.rounds}×
-                                                  </td>
-                                              </tr>`,
-                                      )}
-                                  </tbody>
-                              </table>
-                          </div>
-                          <p class="muted">
-                              Each cell is logged / sent to Health. “Sent”
-                              counts how many hourly entries Health holds for
-                              that day.
-                          </p>`
-                    : emptyState("No days in the sync window yet.")
-            }
-        </section>`;
+        <section class="card" aria-labelledby="hdays"><h2 id="hdays">Energy: logged vs sent</h2>
+<p class="muted">${longDate(s.window.from)} to ${longDate(s.window.to)}</p>
+${s.days.length
+    ? html`<div class="scroll"><table><thead><tr><th>Day</th><th class="num">Logged kcal</th><th class="num">Sent kcal</th><th class="num">Entries</th></tr></thead><tbody>
+${s.days.map(
+    (d) => html`<tr><td>${longDate(d.date)}${d.closed ? "" : html` <span class="tag">open</span>`}</td><td class="num">${cell(d.logged.energy_kcal)}</td><td class="num">${cell(d.sent.energy_kcal)}</td><td class="num">${d.rounds}</td></tr>`,
+)}
+</tbody></table></div>
+<details><summary>All nutrients</summary><div class="scroll"><table><thead><tr><th>Day</th>${fields.map((f) => html`<th class="num">${FIELD_LABEL[f]}</th>`)}</tr></thead><tbody>
+${s.days.map(
+    (d) => html`<tr><td>${longDate(d.date)}</td>${fields.map((f) => html`<td class="num">${cell(d.logged[f])} <span class="muted">/ ${cell(d.sent[f])}</span></td>`)}</tr>`,
+)}
+</tbody></table></div><p class="muted">Each cell is logged / sent to Health.</p></details>
+<p class="muted">“Entries” is how many hourly top-ups Health holds for that day. An open day is still being logged; it closes after 05:00 the next morning.</p>`
+    : emptyState("No days in the sync window yet.")}
+</section>`;
 }
 
 // ---------- Settings ----------

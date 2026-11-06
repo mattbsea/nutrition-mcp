@@ -6,9 +6,9 @@
  */
 import { esc, html, raw, type Raw } from "./html.js";
 
-const W = 640;
-const H = 220;
-const L = 46;
+const W = 420;
+const H = 240;
+const L = 42;
 const R = 8;
 const T = 10;
 const B = 26;
@@ -17,13 +17,27 @@ const PH = H - T - B;
 
 const f = (n: number): string => (Math.round(n * 10) / 10).toString();
 
-/** A tidy axis maximum at or above v (1, 2, 2.5, 5 x 10^k). */
-export function niceMax(v: number): number {
-    if (!(v > 0)) return 1;
+/**
+ * A tidy axis for values up to `v`: a step of 1, 2, 2.5 or 5 x 10^k and a
+ * maximum that is a whole number of steps (at most 5), so every tick label is
+ * round (0, 500, 1000, 1500, 2000 rather than 0, 625, 1250 ...).
+ */
+export function niceScale(v: number): { max: number; step: number; count: number } {
+    if (!(v > 0)) return { max: 1, step: 0.25, count: 4 };
     const exp = Math.floor(Math.log10(v));
     const base = 10 ** exp;
-    for (const m of [1, 2, 2.5, 5, 10]) if (m * base >= v) return m * base;
-    return 10 * base;
+    for (const m of [1, 2, 2.5, 5, 10, 20, 25, 50]) {
+        const step = (m * base) / 2;
+        const count = Math.ceil(v / step - 1e-9);
+        if (count <= 5) return { max: step * count, step, count };
+    }
+    const step = 10 * base;
+    return { max: step * Math.ceil(v / step), step, count: Math.ceil(v / step) };
+}
+
+/** Kept for callers that only want the maximum. */
+export function niceMax(v: number): number {
+    return niceScale(v).max;
 }
 
 const MONTHS = [
@@ -115,16 +129,17 @@ export function barChart(opts: {
     cls: string;
 }): Raw {
     const n = opts.points.length;
-    const max = niceMax(
+    const sc = niceScale(
         Math.max(opts.goal ?? 0, ...opts.points.map((p) => p.value), 0),
     );
+    const max = sc.max;
     const y = (v: number) => T + PH - (v / max) * PH;
     const slot = PW / Math.max(1, n);
     const bw = Math.max(1.5, slot * 0.7);
     const xAt = (i: number) => L + slot * i + slot / 2;
-    const ticks = [0, 1, 2, 3, 4].map((k) => ({
-        y: y((max * k) / 4),
-        label: fmt((max * k) / 4),
+    const ticks = Array.from({ length: sc.count + 1 }, (_, k) => ({
+        y: y(sc.step * k),
+        label: fmt(sc.step * k),
     }));
     const bars = opts.points.map((p, i) =>
         p.value > 0
@@ -175,14 +190,15 @@ export function stackedBarChart(opts: {
 }): Raw {
     const n = opts.points.length;
     const totals = opts.points.map((p) => p.parts.reduce((s, v) => s + v, 0));
-    const max = niceMax(Math.max(...totals, 0));
+    const sc = niceScale(Math.max(...totals, 0));
+    const max = sc.max;
     const y = (v: number) => T + PH - (v / max) * PH;
     const slot = PW / Math.max(1, n);
     const bw = Math.max(1.5, slot * 0.7);
     const xAt = (i: number) => L + slot * i + slot / 2;
-    const ticks = [0, 1, 2, 3, 4].map((k) => ({
-        y: y((max * k) / 4),
-        label: fmt((max * k) / 4),
+    const ticks = Array.from({ length: sc.count + 1 }, (_, k) => ({
+        y: y(sc.step * k),
+        label: fmt(sc.step * k),
     }));
     const bars = opts.points.map((p, i) => {
         let acc = 0;
@@ -228,15 +244,19 @@ export function lineChart(opts: {
     const values = opts.points.map((p) => p.value);
     const lo0 = Math.min(...values);
     const hi0 = Math.max(...values);
-    const pad = Math.max((hi0 - lo0) * 0.15, 0.5);
-    const lo = lo0 - pad;
-    const hi = hi0 + pad;
+    // Round bounds on a round step, so the labels read 79, 80, 81 rather than
+    // 79.9, 80.8, 81.7.
+    const span = Math.max(hi0 - lo0, 1);
+    const step = niceScale(span * 1.3).step;
+    const lo = Math.floor((lo0 - span * 0.1) / step) * step;
+    let hi = Math.ceil((hi0 + span * 0.1) / step) * step;
+    if (hi <= lo) hi = lo + step;
     const y = (v: number) => T + PH - ((v - lo) / (hi - lo)) * PH;
     const xAt = (i: number) => (n === 1 ? L + PW / 2 : L + (PW * i) / (n - 1));
-    const ticks = [0, 1, 2, 3].map((k) => {
-        const v = lo + ((hi - lo) * k) / 3;
-        return { y: y(v), label: f(v) };
-    });
+    const ticks = Array.from(
+        { length: Math.round((hi - lo) / step) + 1 },
+        (_, k) => ({ y: y(lo + step * k), label: fmt(lo + step * k) }),
+    );
     const path = opts.points
         .map((p, i) => `${i === 0 ? "M" : "L"}${f(xAt(i))} ${f(y(p.value))}`)
         .join(" ");

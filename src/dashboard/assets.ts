@@ -26,9 +26,10 @@ header.top{background:var(--surface);border-bottom:1px solid var(--line)}
 .bar{max-width:68rem;margin:0 auto;padding:.6rem 1rem;display:flex;align-items:center;justify-content:space-between;gap:1rem}
 .brand{font-weight:700;letter-spacing:.01em}
 nav.main{max-width:68rem;margin:0 auto;display:flex;gap:.25rem;padding:0 .5rem .5rem;overflow-x:auto}
-nav.main a{flex:1 1 0;min-width:4.2rem;text-align:center;padding:.5rem .4rem;border-radius:.5rem;text-decoration:none;color:var(--muted);font-size:.95rem}
-nav.main a[aria-current="page"]{background:var(--accent);color:var(--accent-ink);font-weight:600}
-main{max-width:68rem;margin:0 auto;padding:1rem}
+nav.main a{flex:1 1 0;min-width:0;text-align:center;padding:.5rem .2rem;border-radius:.5rem;text-decoration:none;color:var(--muted);font-size:.92rem;font-weight:500;white-space:nowrap}
+nav.main a[aria-current="page"]{background:var(--accent);color:var(--accent-ink)}
+main{max-width:68rem;margin:0 auto;padding:1rem 1rem 3rem}
+main>.grid,main>section,main>.notice,main>details{margin-top:1rem}
 h1{font-size:1.4rem;margin:.2rem 0 .2rem}
 h2{font-size:1.05rem;margin:0 0 .6rem}
 .sub{color:var(--muted);margin:0 0 1rem}
@@ -88,6 +89,9 @@ label{display:block;font-weight:600;margin-bottom:.3rem}
 .notice{border:1px solid var(--line);border-radius:.6rem;padding:.6rem .8rem;margin-bottom:.8rem}
 .login{max-width:24rem;margin:12vh auto 0;padding:0 1rem}
 .pager{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-bottom:1rem}
+.pager input[type=search]{flex:1 1 11rem;width:auto}
+.pager input[type=date]{width:auto}
+form.inline{display:inline-flex;gap:.5rem}
 .range a{padding:.35rem .8rem;border:1px solid var(--line);border-radius:999px;text-decoration:none;color:var(--ink)}
 .range a[aria-current="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .range{display:flex;gap:.5rem;margin-bottom:1rem}
