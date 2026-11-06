@@ -70,7 +70,7 @@ function readKeys(file: string): Record<string, unknown> {
 
 /** Atomic write, owner-only. */
 function writeKeys(file: string, keys: Record<string, unknown>): void {
-    mkdirSync(dirname(file), { recursive: true });
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(keys, null, 2) + "\n", { mode: 0o600 });
     chmodSync(tmp, 0o600);

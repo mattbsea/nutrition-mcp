@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MIGRATIONS, TABLES, type Migration } from "./schema";
 import { OWNER_ID } from "./owner";
@@ -106,12 +106,33 @@ export function assertRuntimeSupport(db: Database): void {
 }
 
 /**
+ * Owner-only storage: the directory is 0700 and the database file is created
+ * 0600 BEFORE SQLite opens it (SQLite gives -wal and -shm the main file's
+ * mode, so they inherit it). Nothing in /data is readable by another account
+ * on the host or by a co-resident add-on's volume mount mistake.
+ */
+function prepareFiles(path: string): void {
+    const dir = dirname(path);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    if (!existsSync(path)) closeSync(openSync(path, "a", 0o600));
+    chmodSync(path, 0o600);
+}
+
+/** Belt and braces for sidecars created by an older run or another umask. */
+function restrictSidecars(path: string): void {
+    for (const suffix of ["-wal", "-shm"]) {
+        if (existsSync(path + suffix)) chmodSync(path + suffix, 0o600);
+    }
+}
+
+/**
  * Opens (creating if needed) the database and brings it to the current schema.
  * `path` may be ":memory:" for tests. foreign_keys is a per-connection pragma
  * and must be set on every open.
  */
 export function openDb(path: string = defaultDbPath()): Database {
-    if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+    if (path !== ":memory:") prepareFiles(path);
     const db = new Database(path, { create: true, strict: true });
     try {
         assertRuntimeSupport(db);
@@ -136,6 +157,7 @@ export function openDb(path: string = defaultDbPath()): Database {
         registerFunctions(db);
         runMigrations(db);
         assertSingleOwner(db);
+        if (path !== ":memory:") restrictSidecars(path);
     } catch (error) {
         db.close();
         throw error;

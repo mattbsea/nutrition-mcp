@@ -198,6 +198,9 @@ function startupKeyLine(keys: KeyStore): string {
  * the caller can serve it. Only runs when this file is the entrypoint.
  */
 async function boot(): Promise<Hono<{ Bindings: ServerEnv }>> {
+    // Everything this process creates (keys, database, WAL, exports) is
+    // owner-only unless a path sets a mode explicitly; set before any file.
+    process.umask(0o077);
     const keys = getKeys();
     installLogRedaction(() => [
         keys.mcpKey,
