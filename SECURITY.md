@@ -18,3 +18,12 @@ Please report vulnerabilities privately to the repository owner rather than in a
 public issue. This project is a fork of
 [akutishevsky/nutrition-mcp](https://github.com/akutishevsky/nutrition-mcp); the
 upstream service's policies do not apply to it.
+
+## Runtime user and file permissions
+
+The image runs as root, like Home Assistant add-ons in general: `/data` is a
+root-owned mount, and the container is the isolation boundary. The server
+creates `DATA_DIR` as 0700 and the database, its `-wal`/`-shm` files and
+`keys.json` as 0600 (umask 077 at start-up), so no other account sees them.
+Outside Home Assistant you can run it unprivileged with
+`docker run --user 1000:1000 -v "$PWD/data:/data" ...` on a directory that uid owns.
