@@ -26,8 +26,13 @@ import {
     type UsdaDeps,
 } from "./usda.js";
 import { errorLogText, UpstreamError } from "./errors.js";
-import { categorizeError } from "./analytics.js";
-import { readUsdaFoodCache, writeUsdaFoodCache } from "./db/repo.js";
+import { categorizeError } from "./tool-runner.js";
+import {
+    readFoodCache,
+    readUsdaFoodCache,
+    writeUsdaFoodCache,
+} from "./db/repo.js";
+import { useMemoryDb } from "./db/test-helpers.js";
 import { formatUsdaRecord } from "./usda-text.js";
 import {
     usdaRecordFromPayload,
@@ -878,72 +883,16 @@ describe("fetchFoodDetail", () => {
     });
 });
 
-describe("the Supabase food_cache store", () => {
-    const rows: Array<Record<string, unknown>> = [];
-    let spy: ReturnType<typeof spyOn>;
-    const envBefore = {
-        url: process.env.SUPABASE_URL,
-        key: process.env.SUPABASE_SECRET_KEY,
-    };
-
-    beforeAll(() => {
-        process.env.SUPABASE_URL ??= "http://supabase.test";
-        process.env.SUPABASE_SECRET_KEY ??= "test-key";
-        spy = spyOn(globalThis, "fetch").mockImplementation((async (
-            input: string | URL | Request,
-            init?: RequestInit,
-        ) => {
-            const req =
-                input instanceof Request
-                    ? new Request(input, init)
-                    : new Request(input.toString(), init);
-            const url = new URL(req.url);
-            if (url.pathname !== "/rest/v1/food_cache") {
-                throw new Error(`unexpected request ${req.url}`);
-            }
-            if (req.method === "POST") {
-                const body = JSON.parse(await req.text()) as Record<
-                    string,
-                    unknown
-                >;
-                const i = rows.findIndex(
-                    (r) =>
-                        r.source === body.source &&
-                        r.source_id === body.source_id,
-                );
-                if (i >= 0) rows[i] = body;
-                else rows.push(body);
-                return new Response(null, { status: 201 });
-            }
-            if (req.method === "GET") {
-                const eq = (k: string) =>
-                    url.searchParams.get(k)?.replace(/^eq\./, "");
-                const found = rows.filter(
-                    (r) =>
-                        r.source === eq("source") &&
-                        r.source_id === eq("source_id"),
-                );
-                return new Response(JSON.stringify(found), {
-                    status: 200,
-                    headers: { "content-type": "application/json" },
-                });
-            }
-            throw new Error(`unexpected ${req.method}`);
-        }) as typeof fetch);
-    });
-
-    afterAll(() => {
-        spy.mockRestore();
-        if (envBefore.url === undefined) delete process.env.SUPABASE_URL;
-        if (envBefore.key === undefined) delete process.env.SUPABASE_SECRET_KEY;
-    });
+describe("the SQLite food_cache store", () => {
+    useMemoryDb();
 
     test("a written record reads back with its fetch time, under source usda and the id as text", async () => {
         const record = freshRecord();
         const at = Date.parse("2026-10-09T08:00:00.000Z");
         await writeUsdaFoodCache(record, at);
-        expect(rows).toHaveLength(1);
-        expect(rows[0]).toMatchObject({ source: "usda", source_id: "173944" });
+        const row = await readFoodCache("usda", "173944");
+        expect(row).not.toBeNull();
+        expect(row!.payload).toEqual(record);
         const back = await readUsdaFoodCache(173944);
         expect(back).toEqual({ record, fetchedAt: at });
     });

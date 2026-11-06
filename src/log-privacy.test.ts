@@ -1,0 +1,192 @@
+import { test, expect } from "bun:test";
+import ts from "typescript";
+
+// The privacy policy promises that the server runtime log does not contain
+// your account id or email address. Every runtime log line is a console.*
+// call, so this parses every non-test source file and fails if a console.*
+// argument list mentions a user id, an email, a `user=` field or a per-user
+// storage folder name. Per-user questions belong in tool_analytics.
+//
+// Parsed with the TypeScript compiler rather than scanned as text: a text
+// window would flag the persistAnalytics({ user_id }) call that follows the
+// log line in runTool, and a hand-rolled paren counter trips on regex
+// literals such as /[)]/.
+
+const FORBIDDEN = /\buser(Id|_id)\b|user=|\bemail\b|folder\.name/;
+const METHODS = new Set(["log", "warn", "error", "info"]);
+
+/** The source text of every console.log/warn/error/info argument list. */
+function consoleArguments(path: string, src: string) {
+    const file = ts.createSourceFile(path, src, ts.ScriptTarget.Latest, true);
+    const found: { line: number; args: string }[] = [];
+    const visit = (node: ts.Node) => {
+        if (
+            ts.isCallExpression(node) &&
+            ts.isPropertyAccessExpression(node.expression) &&
+            ts.isIdentifier(node.expression.expression) &&
+            node.expression.expression.text === "console" &&
+            METHODS.has(node.expression.name.text)
+        ) {
+            found.push({
+                line:
+                    file.getLineAndCharacterOfPosition(node.getStart()).line +
+                    1,
+                args: node.arguments.map((a) => a.getText(file)).join(", "),
+            });
+        }
+        ts.forEachChild(node, visit);
+    };
+    visit(file);
+    return found;
+}
+
+test("argument extraction survives regex literals and stops at the call", () => {
+    const src =
+        'console.log(s.replace(/[)]/g, ""), userId); console.warn(x.split(/"/)); persistAnalytics({ user_id });';
+    const calls = consoleArguments("t.ts", src);
+    expect(calls.map((c) => c.args)).toEqual([
+        's.replace(/[)]/g, ""), userId',
+        'x.split(/"/)',
+    ]);
+    expect(calls.map((c) => FORBIDDEN.test(c.args))).toEqual([true, false]);
+});
+
+test("no runtime log line carries a user id or email", async () => {
+    const glob = new Bun.Glob("**/*.ts");
+    const offenders: string[] = [];
+    let count = 0;
+    for await (const path of glob.scan({ cwd: import.meta.dir })) {
+        if (path.endsWith(".test.ts")) continue;
+        const src = await Bun.file(`${import.meta.dir}/${path}`).text();
+        for (const { line, args } of consoleArguments(path, src)) {
+            count++;
+            if (FORBIDDEN.test(args))
+                offenders.push(`${path}:${line}: ${args.slice(0, 120)}`);
+        }
+    }
+    // A glob or parser that found nothing would pass without checking anything.
+    expect(count).toBeGreaterThan(20);
+    expect(offenders).toEqual([]);
+});
+
+// The access log prints the path through redactPath, which hides the MCP key.
+// src/index.test.ts drives the real app to check the line it prints; this pins
+// that the [req] line goes through it.
+test("the access log line hides the MCP key", async () => {
+    const src = await Bun.file(`${import.meta.dir}/perimeter.ts`).text();
+    const req = consoleArguments("perimeter.ts", src).filter(({ args }) =>
+        args.includes("[req]"),
+    );
+    expect(req).toHaveLength(1);
+    expect(req[0]!.args).toContain("redactPath(path)");
+});
+
+// Item and saved-meal names are the user's own food text, and the runtime log
+// never carries it. A ToolError that quotes them carries a logText without
+// them, and runTool logs that instead of the message. Driven through the
+// real runTool with console captured.
+test("a meal-items refusal thrown through runTool keeps item names off the console", async () => {
+    const { runTool } = await import("./tool-runner.js");
+    const { findItem, validateItems } = await import("./meal-items.js");
+    const { items } = validateItems(
+        [
+            {
+                name: "Соус гірчичний",
+                calories: 80,
+                protein_g: 0,
+                carbs_g: 20,
+                fat_g: 0,
+            },
+            {
+                name: "Insulin-day oats",
+                calories: 300,
+                protein_g: 10,
+                carbs_g: 50,
+                fat_g: 5,
+            },
+        ],
+        { addedSugarRequired: false },
+    );
+
+    const lines: string[] = [];
+    const methods = ["log", "warn", "error", "info"] as const;
+    const saved = methods.map((m) => console[m]);
+    for (const m of methods) {
+        console[m] = (...args: unknown[]) => {
+            lines.push(args.map(String).join(" "));
+        };
+    }
+    let result: { content: { text: string }[]; isError?: boolean };
+    try {
+        result = await runTool("log_saved_meal", async () => {
+            findItem(items, "tomato soup");
+            return { content: [{ text: "unreachable" }] };
+        });
+    } finally {
+        methods.forEach((m, i) => (console[m] = saved[i]!));
+    }
+
+    // The caller still gets the names, to pick an item by.
+    expect(result.isError).toBe(true);
+    expect(result.content[0]!.text).toContain("Соус гірчичний");
+    // The log line is there, with the category, and without any food text.
+    const log = lines.join("\n");
+    expect(log).toContain("[tool] log_saved_meal error=meal_items_invalid");
+    for (const text of ["Соус", "Insulin-day oats", "tomato soup", "u-1"]) {
+        expect(log).not.toContain(text);
+    }
+});
+
+// The USDA client logs one [usda] line per call, with the tool, the result and
+// the quota left: never the query text, the FoodData Central id, the API key or
+// the user id. Driven through the real client with an injected fetch and cache
+// and console.log captured; no network and no Supabase.
+test("the [usda] log lines carry no query, id, key or user id", async () => {
+    const { searchUsda, getFoodRecord, createUsdaState } =
+        await import("./usda.js");
+    const search = (await import("./__fixtures__/usda/search-banana.json"))
+        .default;
+    const detail = (
+        await import("./__fixtures__/usda/detail-SR_Legacy-173944-full.json")
+    ).default;
+    const KEY = "usda-key-must-not-log-7731";
+    const USER = "user-id-must-not-log-4417";
+    const QUERY = "banana split marker-9913";
+    const reply = (body: unknown) =>
+        new Response(JSON.stringify(body), {
+            status: 200,
+            headers: {
+                "content-type": "application/json",
+                "x-ratelimit-limit": "3600",
+                "x-ratelimit-remaining": "2998",
+            },
+        });
+    const deps = {
+        env: { USDA_API_KEY: KEY },
+        now: () => Date.parse("2026-10-10T12:00:00Z"),
+        state: createUsdaState(),
+        cache: { get: async () => null, put: async () => {} },
+        fetch: async (url: string) =>
+            url.includes("/foods/search") ? reply(search) : reply(detail),
+    };
+
+    const lines: string[] = [];
+    const saved = console.log;
+    console.log = (...args: unknown[]) => {
+        lines.push(args.map(String).join(" "));
+    };
+    try {
+        await searchUsda(QUERY, USER, deps);
+        await getFoodRecord(173944, USER, deps);
+    } finally {
+        console.log = saved;
+    }
+
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+        expect(line).toMatch(/^\[usda\] tool=(search|detail) result=ok /);
+        for (const secret of [QUERY, "9913", "173944", KEY, USER]) {
+            expect(line).not.toContain(secret);
+        }
+    }
+});

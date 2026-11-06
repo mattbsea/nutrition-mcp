@@ -5,10 +5,27 @@ import {
     beforeAll,
     afterAll,
     beforeEach,
+    afterEach,
     spyOn,
 } from "bun:test";
 import {
-    buildAccountCsv,
+    existsSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+    OWNER_ID,
+    exportArchivePath,
+    insertMeal,
+    insertWater,
+} from "./db/repo.js";
+import { useMemoryDb } from "./db/test-helpers.js";
+import { verifyExportLink } from "./export-files.js";
+import {
     buildActiveCaloriesCsv,
     buildBodyMeasurementsCsv,
     buildConnectionsCsv,
@@ -21,7 +38,6 @@ import {
     buildProfileCsv,
     buildSavedMealItemsCsv,
     buildSavedMealsCsv,
-    buildTelemetryCsv,
     buildWaterCsv,
     buildWeightCsv,
     EXPORT_ARCHIVE_FILES,
@@ -30,29 +46,18 @@ import {
     type SavedMealExportRow,
     type SavedMealItemExportRow,
 } from "./export.js";
+import { HEALTH_SYNC_FIELDS } from "./health-sync.js";
+import type { NutritionGoalsHistoryRow } from "./goals-history.js";
 import type {
+    BodyMeasurementEntry,
     HealthSyncDayRow,
     HealthSyncLinkStatus,
     HealthSyncStore,
-} from "./health-sync-store.js";
-import { HEALTH_SYNC_FIELDS } from "./health-sync.js";
-import type { NutritionGoalsHistoryRow } from "./goals-history.js";
-import type { User } from "@supabase/supabase-js";
-import type {
-    BodyMeasurementEntry,
     Meal,
     NutritionGoals,
-    OAuthGrantRow,
     Profile,
-    ToolAnalyticsRow,
     WaterEntry,
     WeightEntry,
-} from "./db/repo.js";
-import {
-    getAllBodyMeasurements,
-    getAllOAuthGrants,
-    getAllToolAnalytics,
-    getAuthAccount,
 } from "./db/repo.js";
 import { buildZip } from "./zip.js";
 
@@ -1228,45 +1233,6 @@ test("profile.csv carries the chosen widget language", () => {
     expect(f.locale).toBe("uk");
 });
 
-test("README.txt says what the archive leaves out, with no email fallback", () => {
-    const readme = buildExportReadme(README_OPTS);
-    expect(readme).toContain("Not in this archive");
-    expect(readme).toContain("everything the service stores about you");
-    expect(readme).toContain("server runtime log");
-    expect(readme).toContain("does not contain your account id");
-    expect(readme).toContain("rolling backups");
-    expect(readme).toContain("internal bookkeeping");
-    expect(readme).toContain("sign-in session record");
-    expect(readme).not.toContain("within one month");
-    expect(readme).not.toMatch(/email (us|the contact)/i);
-    // The old wording sent people to email for data the archive now holds.
-    expect(readme).not.toContain("your account email, account and sign-in");
-});
-
-test("profile.csv names the zone its own timestamps are rendered in", () => {
-    // The profile never ran set_timezone, so the export falls back to UTC and
-    // the timezone column says UTC — the two timestamps beside it would
-    // otherwise be zone-less wall clocks in the one file that is supposed to
-    // explain the account's zone.
-    const f = fieldsByName(buildProfileCsv(profile({ timezone: null }), "UTC"));
-    expect(f.timezone).toBe("UTC");
-    expect(f.created_at).toBe("2026-01-02 14:30:00");
-    expect(f.updated_at).toBe("2026-06-20 14:30:00");
-});
-
-test("profile.csv survives a free-form value needing quoting", () => {
-    // preferred_drink_unit is free-form text to the DB, so an unrecognised
-    // value must round-trip rather than break the row.
-    const f = fieldsByName(
-        buildProfileCsv(
-            profile({ preferred_drink_unit: 'us, "standard"' as never }),
-            "UTC",
-        ),
-    );
-    expect(f.preferred_drink_unit).toBe('us, "standard"');
-    expect(f.widgets_enabled).toBe("true");
-});
-
 const README_OPTS = {
     generatedAt: new Date("2026-06-20T14:30:00.000Z"),
     tz: "Europe/Berlin",
@@ -1282,11 +1248,20 @@ const README_OPTS = {
         weight: 12,
         bodyMeasurements: 7,
         goalsHistory: 4,
-        telemetry: 830,
-        connections: 3,
+        connections: 2,
         healthSync: 6,
     },
 };
+
+test("README.txt says what the archive leaves out", () => {
+    const readme = buildExportReadme(README_OPTS);
+    expect(readme).toContain("Not in this archive");
+    expect(readme).toContain("everything this server stores about you");
+    expect(readme).toContain("server runtime log");
+    expect(readme).toContain("never an access key");
+    expect(readme).toContain("internal bookkeeping");
+    expect(readme).not.toMatch(/sign-in|password|email/i);
+});
 
 test("the README names every file in the archive", () => {
     const readme = buildExportReadme(README_OPTS);
@@ -1303,8 +1278,7 @@ test("the README states when, in which zone, and that the zone was chosen", () =
     expect(readme).toContain("45 rows");
     expect(readme).toContain("12 rows");
     expect(readme).toContain("7 rows");
-    expect(readme).toContain("830 rows");
-    expect(readme).toContain("3 rows");
+    expect(readme).toContain("connections.csv 2 rows");
     expect(readme).toContain("health_sync.csv 6 rows");
     expect(readme).toContain("goals_history.csv 4 rows");
 });
@@ -1379,95 +1353,15 @@ test("the README counts and joins the meal ingredient and saved meal files", () 
     );
 });
 
-// ---------- account.csv, telemetry.csv, connections.csv ----------
-
-function authUser(overrides: Partial<User> = {}): User {
-    return {
-        id: "44444444-4444-4444-8444-444444444444",
-        aud: "authenticated",
-        role: "authenticated",
-        email: "someone@example.com",
-        created_at: "2026-01-02T14:30:00.000Z",
-        email_confirmed_at: "2026-01-02T14:31:00.000Z",
-        last_sign_in_at: "2026-06-20T14:30:00.000Z",
-        app_metadata: { provider: "email", providers: ["email", "google"] },
-        user_metadata: {
-            email: "someone@example.com",
-            name: "Some One",
-            full_name: "Some One",
-            picture: "https://example.com/p.jpg",
-            avatar_url: "https://example.com/a.jpg",
-        },
-        identities: [
-            {
-                id: "44444444-4444-4444-8444-444444444444",
-                identity_id: "55555555-5555-4555-8555-555555555555",
-                user_id: "44444444-4444-4444-8444-444444444444",
-                provider: "email",
-                identity_data: { email: "someone@example.com" },
-                created_at: "2026-01-02T14:30:00.000Z",
-                last_sign_in_at: "2026-01-02T14:30:00.000Z",
-            },
-            {
-                id: "109876543210987654321",
-                identity_id: "66666666-6666-4666-8666-666666666666",
-                user_id: "44444444-4444-4444-8444-444444444444",
-                provider: "google",
-                identity_data: {
-                    email: "someone@example.com",
-                    name: 'Some, "One"',
-                    picture: "https://example.com/g.jpg",
-                },
-                created_at: "2026-03-01T09:00:00.000Z",
-                last_sign_in_at: "2026-06-20T14:30:00.000Z",
-            },
-        ],
-        ...overrides,
-    } as User;
-}
-
-function telemetryRow(
-    overrides: Partial<ToolAnalyticsRow> = {},
-): ToolAnalyticsRow {
-    return {
-        id: "77777777-7777-4777-8777-777777777777",
-        tool_name: "log_meal",
-        success: false,
-        duration_ms: 142,
-        error_category: "validation_error",
-        date_range_days: null,
-        mcp_session_id: "sess-1",
-        protocol_era: "modern",
-        client_name: "claude-ai/1.0",
-        invoked_at: "2026-06-20T14:30:00.000Z",
-        created_at: "2026-06-20T14:30:01.000Z",
-        ...overrides,
-    };
-}
-
-function grant(overrides: Partial<OAuthGrantRow> = {}): OAuthGrantRow {
-    return {
-        kind: "refresh_token",
-        client_id: "client-abc",
-        client_name: "Claude",
-        redirect_uri: null,
-        created_at: "2026-06-20T14:30:00.000Z",
-        expires_at: "2026-09-18T14:30:00.000Z",
-        ...overrides,
-    };
-}
-
 // No column in the archive may be named after a secret. The export is a copy
 // of the user's data, not a set of credentials, and the token/code columns
 // hold hashes that are secrets-adjacent all the same.
 const SECRET_HEADER = /token$|^code|hash|secret|password|challenge|verifier/i;
 
-test("account.csv, telemetry.csv and connections.csv are header-only when empty", () => {
+test("connections.csv, health_sync.csv and goals_history.csv are header-only when empty", () => {
     for (const csv of [
-        buildAccountCsv(null, "UTC"),
-        buildTelemetryCsv([], "UTC"),
-        buildConnectionsCsv([], "UTC"),
-        buildConnectionsCsv([], "UTC", null),
+        buildConnectionsCsv("UTC"),
+        buildConnectionsCsv("UTC", null),
         buildHealthSyncCsv([], "UTC"),
         buildGoalsHistoryCsv([], "UTC"),
     ]) {
@@ -1485,85 +1379,14 @@ test("no archive file has a token, hash or password column", () => {
         buildGoalsCsv(null, "UTC"),
         buildGoalsHistoryCsv([], "UTC"),
         buildProfileCsv(null, "UTC"),
-        buildAccountCsv(null, "UTC"),
-        buildTelemetryCsv([], "UTC"),
-        buildConnectionsCsv([], "UTC"),
+        buildConnectionsCsv("UTC"),
         buildHealthSyncCsv([], "UTC"),
     ].flatMap((csv) => parseCsv(csv)[0]!);
     for (const name of headers) expect(name).not.toMatch(SECRET_HEADER);
 });
 
-test("every account value lands under its own header name", () => {
-    const csv = buildAccountCsv(authUser(), "Europe/Berlin");
-    // One account row, then one row per sign-in identity.
-    expect(parseCsv(csv)).toHaveLength(4);
-    expect(fieldsByName(csv, 1)).toEqual({
-        record: "account",
-        user_id: "44444444-4444-4444-8444-444444444444",
-        email: "someone@example.com",
-        created_at: "2026-01-02 15:30:00",
-        email_confirmed_at: "2026-01-02 15:31:00",
-        last_sign_in_at: "2026-06-20 16:30:00",
-        timezone: "Europe/Berlin",
-        sign_in_methods: "email;google",
-        provider: "",
-        provider_account_id: "",
-        name: "Some One",
-        full_name: "Some One",
-        picture: "https://example.com/p.jpg",
-        avatar_url: "https://example.com/a.jpg",
-    });
-    expect(fieldsByName(csv, 3)).toEqual({
-        record: "identity",
-        user_id: "44444444-4444-4444-8444-444444444444",
-        email: "someone@example.com",
-        created_at: "2026-03-01 10:00:00",
-        email_confirmed_at: "",
-        last_sign_in_at: "2026-06-20 16:30:00",
-        timezone: "Europe/Berlin",
-        sign_in_methods: "",
-        provider: "google",
-        provider_account_id: "109876543210987654321",
-        // A claim that needs quoting survives the round trip.
-        name: 'Some, "One"',
-        full_name: "",
-        picture: "https://example.com/g.jpg",
-        avatar_url: "",
-    });
-});
-
-test("account.csv falls back to the identities when providers is absent", () => {
-    const f = fieldsByName(
-        buildAccountCsv(
-            authUser({ app_metadata: { provider: "email" } }),
-            "UTC",
-        ),
-    );
-    expect(f.sign_in_methods).toBe("email;google");
-});
-
-test("every telemetry value lands under its own header name", () => {
-    const f = fieldsByName(buildTelemetryCsv([telemetryRow()], "Asia/Tokyo"));
-    expect(f).toEqual({
-        id: "77777777-7777-4777-8777-777777777777",
-        invoked_at: "2026-06-20 23:30:00",
-        timezone: "Asia/Tokyo",
-        tool_name: "log_meal",
-        // false must read as the word, not an empty cell.
-        success: "false",
-        duration_ms: "142",
-        error_category: "validation_error",
-        date_range_days: "",
-        mcp_session_id: "sess-1",
-        protocol_era: "modern",
-        client_name: "claude-ai/1.0",
-        created_at: "2026-06-20 23:30:01",
-    });
-    expect(Object.keys(f)).not.toContain("user_id");
-});
-
 test("the activity shortcut's link is its own row, with no fields or start date", () => {
-    const csv = buildConnectionsCsv([], "UTC", null, {
+    const csv = buildConnectionsCsv("UTC", null, {
         fallback_tz: "Europe/Kyiv",
         created_at: "2026-11-02T10:00:00.000Z",
         last_used_at: "2026-11-02T11:00:00.000Z",
@@ -1572,9 +1395,7 @@ test("the activity shortcut's link is its own row, with no fields or start date"
     });
     expect(fieldsByName(csv, 1)).toEqual({
         kind: "health_activity_sync",
-        client_id: "nutrition-mcp-health-sync",
-        client_name: "Apple Health activity sync (iOS Shortcut)",
-        redirect_uri: "",
+        name: "Apple Health activity sync (iOS Shortcut)",
         created_at: "2026-11-02 10:00:00",
         expires_at: "2027-01-31 11:00:00",
         last_used_at: "2026-11-02 11:00:00",
@@ -1583,396 +1404,6 @@ test("the activity shortcut's link is its own row, with no fields or start date"
         synced_fields: "",
         sync_start_date: "",
         device_timezone: "Europe/Kyiv",
-    });
-});
-
-test("every connection value lands under its own header name", () => {
-    const csv = buildConnectionsCsv(
-        [
-            grant({
-                kind: "access_token",
-                client_id: null,
-                client_name: null,
-            }),
-            grant(),
-            grant({
-                kind: "authorization_code",
-                redirect_uri: "https://claude.ai/api/mcp/auth_callback",
-                expires_at: "2026-06-20T14:40:00.000Z",
-            }),
-        ],
-        "UTC",
-    );
-    expect(fieldsByName(csv, 1)).toEqual({
-        kind: "access_token",
-        client_id: "",
-        client_name: "",
-        redirect_uri: "",
-        created_at: "2026-06-20 14:30:00",
-        expires_at: "2026-09-18 14:30:00",
-        last_used_at: "",
-        last_sync_at: "",
-        timezone: "UTC",
-        synced_fields: "",
-        sync_start_date: "",
-        device_timezone: "",
-    });
-    expect(fieldsByName(csv, 2)).toEqual({
-        kind: "refresh_token",
-        client_id: "client-abc",
-        client_name: "Claude",
-        redirect_uri: "",
-        created_at: "2026-06-20 14:30:00",
-        expires_at: "2026-09-18 14:30:00",
-        last_used_at: "",
-        last_sync_at: "",
-        timezone: "UTC",
-        synced_fields: "",
-        sync_start_date: "",
-        device_timezone: "",
-    });
-    expect(fieldsByName(csv, 3).redirect_uri).toBe(
-        "https://claude.ai/api/mcp/auth_callback",
-    );
-});
-
-// ---------- The export-only readers, against a stubbed PostgREST ----------
-//
-// No mock.module (it is process-wide; see CLAUDE.md): the real readers run
-// against a stubbed global fetch, which supabase-js resolves at call time, the
-// same way src/supabase-window.test.ts drives the window readers. Any request
-// the stub does not recognise is refused, never passed through — Bun
-// auto-loads .env, so the client may point at a real project.
-
-describe("export-only readers", () => {
-    const USER = "11111111-1111-4111-8111-111111111111";
-    const OTHER = "22222222-2222-4222-8222-222222222222";
-    type Row = Record<string, unknown>;
-    let tables: Record<string, Row[]> = {};
-    let maxRows = 1000;
-    let authUsers: Record<string, unknown> = {};
-    // Runs once, right after the first page is served: a row landing mid-export.
-    let afterFirstPage: (() => void) | null = null;
-    const selects: { table: string; select: string }[] = [];
-
-    function refuse(why: string): never {
-        throw new Error(`export reader stub refused a request: ${why}`);
-    }
-
-    function inValues(filter: string): string[] {
-        const m = filter.match(/^in\.\((.*)\)$/);
-        if (!m) refuse(`in filter ${filter}`);
-        return m[1]!.split(",").map((v) => v.replace(/^"|"$/g, ""));
-    }
-
-    async function fake(
-        input: string | URL | Request,
-        init?: RequestInit,
-    ): Promise<Response> {
-        const req =
-            input instanceof Request
-                ? new Request(input, init)
-                : new Request(input.toString(), init);
-        const url = new URL(req.url);
-        if (req.method !== "GET") refuse(`${req.method} ${req.url}`);
-        const json = (body: unknown, status = 200, headers = {}) =>
-            new Response(JSON.stringify(body), {
-                status,
-                headers: { "content-type": "application/json", ...headers },
-            });
-
-        const admin = url.pathname.match(/^\/auth\/v1\/admin\/users\/(.+)$/);
-        if (admin) {
-            const user = authUsers[admin[1]!];
-            return user
-                ? json(user)
-                : json(
-                      {
-                          code: 404,
-                          error_code: "user_not_found",
-                          msg: "User not found",
-                      },
-                      404,
-                  );
-        }
-
-        const table = url.pathname.replace(/^\/rest\/v1\//, "");
-        if (!(table in tables)) refuse(req.url);
-        const q = url.searchParams;
-        const select = q.get("select") ?? "";
-        selects.push({ table, select });
-        const columns = select.split(",").map((c) => c.trim());
-        const project = (r: Row) =>
-            select === "*"
-                ? { ...r }
-                : Object.fromEntries(columns.map((c) => [c, r[c]]));
-
-        if (table === "oauth_clients") {
-            const ids = inValues(q.get("client_id") ?? "");
-            return json(
-                tables[table]!.filter((r) =>
-                    ids.includes(r.client_id as string),
-                ).map(project),
-            );
-        }
-
-        const userId = q.get("user_id")?.replace(/^eq\./, "");
-        if (!userId || !q.has("offset") || !q.has("limit"))
-            refuse(`unbounded ${url.search}`);
-        const order = (q.get("order") ?? "")
-            .split(",")
-            .map((o) => o.replace(/\.asc$/, ""));
-        if (order.length < 2) refuse(`no total order: ${q.get("order")}`);
-        const matched = tables[table]!.filter((r) => r.user_id === userId).sort(
-            (a, b) => {
-                for (const c of order) {
-                    const x = String(a[c]);
-                    const y = String(b[c]);
-                    if (x !== y) return x < y ? -1 : 1;
-                }
-                return 0;
-            },
-        );
-        const offset = Number(q.get("offset"));
-        const limit = Number(q.get("limit"));
-        const page = matched.slice(offset, offset + Math.min(limit, maxRows));
-        const total = req.headers.get("prefer")?.includes("count=exact")
-            ? String(matched.length)
-            : "*";
-        if (offset === 0 && afterFirstPage) {
-            afterFirstPage();
-            afterFirstPage = null;
-        }
-        const range =
-            page.length === 0 ? "*" : `${offset}-${offset + page.length - 1}`;
-        return json(page.map(project), 200, {
-            "content-range": `${range}/${total}`,
-        });
-    }
-
-    const envBefore = {
-        url: process.env.SUPABASE_URL,
-        key: process.env.SUPABASE_SECRET_KEY,
-    };
-    let fetchSpy: ReturnType<typeof spyOn>;
-
-    beforeAll(() => {
-        process.env.SUPABASE_URL ??= "http://supabase.test";
-        process.env.SUPABASE_SECRET_KEY ??= "test-key";
-        fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-            fake as typeof fetch,
-        );
-    });
-
-    afterAll(() => {
-        fetchSpy.mockRestore();
-        if (envBefore.url === undefined) delete process.env.SUPABASE_URL;
-        if (envBefore.key === undefined) delete process.env.SUPABASE_SECRET_KEY;
-    });
-
-    beforeEach(() => {
-        maxRows = 1000;
-        afterFirstPage = null;
-        selects.length = 0;
-        authUsers = {};
-        const telemetry: Row[] = [];
-        for (let i = 0; i < 2500; i++) {
-            telemetry.push({
-                id: crypto.randomUUID(),
-                // tool_analytics.user_id is varchar: the uuid as text.
-                user_id: USER,
-                tool_name: "log_meal",
-                success: true,
-                duration_ms: i,
-                error_category: null,
-                date_range_days: null,
-                mcp_session_id: null,
-                protocol_era: "modern",
-                client_name: null,
-                // Three rows per timestamp, so ties straddle page edges.
-                invoked_at: new Date(
-                    Date.UTC(2026, 0, 1, 0, Math.floor(i / 3)),
-                ).toISOString(),
-                created_at: null,
-            });
-        }
-        telemetry.push({
-            ...telemetry[0]!,
-            id: crypto.randomUUID(),
-            user_id: OTHER,
-        });
-        const measurements: Row[] = [];
-        for (let i = 0; i < 1300; i++) {
-            measurements.push({
-                id: crypto.randomUUID(),
-                user_id: USER,
-                kind: i % 2 === 0 ? "waist" : "hips",
-                value_mm: 800 + (i % 50),
-                value_entered: (800 + (i % 50)) / 10,
-                entered_unit: "cm",
-                // Two rows per timestamp, so ties straddle page edges.
-                logged_at: new Date(
-                    Date.UTC(2026, 0, 1, 0, Math.floor(i / 2)),
-                ).toISOString(),
-                notes: null,
-                created_at: null,
-                idempotency_key: null,
-            });
-        }
-        measurements.push({
-            ...measurements[0]!,
-            id: crypto.randomUUID(),
-            user_id: OTHER,
-        });
-        tables = {
-            tool_analytics: telemetry.sort(() => Math.random() - 0.5),
-            body_measurement_log: measurements.sort(() => Math.random() - 0.5),
-            oauth_tokens: [
-                {
-                    token: "hash-a",
-                    user_id: USER,
-                    created_at: "2026-06-20T10:00:00.000Z",
-                    expires_at: "2026-06-21T10:00:00.000Z",
-                },
-                {
-                    token: "hash-other",
-                    user_id: OTHER,
-                    created_at: "2026-06-20T10:00:00.000Z",
-                    expires_at: "2026-06-21T10:00:00.000Z",
-                },
-            ],
-            refresh_tokens: [
-                {
-                    token: "hash-r1",
-                    user_id: USER,
-                    client_id: "client-abc",
-                    created_at: "2026-06-20T10:00:00.000Z",
-                    expires_at: "2026-09-18T10:00:00.000Z",
-                },
-                {
-                    token: "hash-r2",
-                    user_id: USER,
-                    client_id: null,
-                    created_at: "2026-05-01T10:00:00.000Z",
-                    expires_at: "2027-05-01T10:00:00.000Z",
-                },
-            ],
-            auth_codes: [
-                {
-                    code: "hash-c",
-                    user_id: USER,
-                    client_id: "client-abc",
-                    redirect_uri: "https://claude.ai/api/mcp/auth_callback",
-                    code_challenge: "challenge",
-                    created_at: "2026-06-20T10:00:00.000Z",
-                    expires_at: "2026-06-20T10:10:00.000Z",
-                },
-            ],
-            oauth_clients: [{ client_id: "client-abc", client_name: "Claude" }],
-        };
-    });
-
-    test("getAllToolAnalytics returns every row past the 1000-row cap, in order", async () => {
-        const rows = await getAllToolAnalytics(USER);
-        expect(rows).toHaveLength(2500);
-        expect(new Set(rows.map((r) => r.id)).size).toBe(2500);
-        for (let i = 1; i < rows.length; i++) {
-            const a = rows[i - 1]!;
-            const b = rows[i]!;
-            expect(
-                a.invoked_at < b.invoked_at ||
-                    (a.invoked_at === b.invoked_at && a.id < b.id),
-            ).toBe(true);
-        }
-        // user_id is not read back: it is the same on every row.
-        expect(Object.keys(rows[0]!)).not.toContain("user_id");
-    });
-
-    test("getAllToolAnalytics drops a row repeated by an insert between pages", async () => {
-        // withAnalytics stamps invoked_at when a call starts and inserts the
-        // row when it ends, so a parallel call can land ahead of the offset
-        // already paged, shifting the last row of page one onto page two.
-        afterFirstPage = () =>
-            tables.tool_analytics!.push({
-                ...tables.tool_analytics!.find((r) => r.user_id === USER)!,
-                id: "00000000-0000-4000-8000-000000000000",
-                invoked_at: "2025-12-31T23:59:00.000Z",
-            });
-        const rows = await getAllToolAnalytics(USER);
-        expect(new Set(rows.map((r) => r.id)).size).toBe(rows.length);
-        expect(rows).toHaveLength(2500);
-    });
-
-    test("getAllToolAnalytics throws rather than export a truncated history", async () => {
-        // A server whose db-max-rows is below the page size: the short first
-        // page looks like the last one, and only the exact count catches it.
-        maxRows = 400;
-        await expect(getAllToolAnalytics(USER)).rejects.toThrow(
-            "export would be truncated",
-        );
-    });
-
-    test("getAllBodyMeasurements returns every row past the 1000-row cap, in order", async () => {
-        const rows = await getAllBodyMeasurements(USER);
-        expect(rows).toHaveLength(1300);
-        expect(new Set(rows.map((r) => r.id)).size).toBe(1300);
-        expect(rows.every((r) => r.user_id === USER)).toBe(true);
-        for (let i = 1; i < rows.length; i++) {
-            const a = rows[i - 1]!;
-            const b = rows[i]!;
-            expect(
-                a.logged_at < b.logged_at ||
-                    (a.logged_at === b.logged_at && a.id < b.id),
-            ).toBe(true);
-        }
-    });
-
-    test("getAllBodyMeasurements throws rather than export a truncated history", async () => {
-        maxRows = 400;
-        await expect(getAllBodyMeasurements(USER)).rejects.toThrow(
-            "would be truncated",
-        );
-    });
-
-    test("getAllOAuthGrants lists every grant with its client and never reads a secret", async () => {
-        const grants = await getAllOAuthGrants(USER);
-        expect(grants.map((g) => g.kind)).toEqual([
-            "access_token",
-            "refresh_token",
-            "refresh_token",
-            "authorization_code",
-        ]);
-        expect(grants[0]!.client_id).toBeNull();
-        // Oldest first within a table.
-        expect(grants[1]!.client_id).toBeNull();
-        expect(grants[2]!).toMatchObject({
-            client_id: "client-abc",
-            client_name: "Claude",
-        });
-        expect(grants[3]!).toMatchObject({
-            client_name: "Claude",
-            redirect_uri: "https://claude.ai/api/mcp/auth_callback",
-        });
-        for (const g of grants)
-            for (const key of Object.keys(g))
-                expect(key).not.toMatch(SECRET_HEADER);
-        for (const { select } of selects)
-            expect(select).not.toMatch(
-                /token\b|\bcode\b|challenge|hash|secret/,
-            );
-    });
-
-    test("getAllOAuthGrants throws when a grant table comes back short", async () => {
-        maxRows = 1;
-        await expect(getAllOAuthGrants(USER)).rejects.toThrow(
-            "export would be truncated",
-        );
-    });
-
-    test("getAuthAccount returns the Auth user, or null when there is none", async () => {
-        authUsers[USER] = authUser({ id: USER });
-        expect((await getAuthAccount(USER))?.email).toBe("someone@example.com");
-        expect(await getAuthAccount(OTHER)).toBeNull();
     });
 });
 
@@ -2036,8 +1467,6 @@ test("EXPORT_ARCHIVE_FILES is the archive's real, ordered file list", () => {
         "goals.csv",
         "goals_history.csv",
         "profile.csv",
-        "account.csv",
-        "telemetry.csv",
         "connections.csv",
         "health_sync.csv",
         "README.txt",
@@ -2045,8 +1474,7 @@ test("EXPORT_ARCHIVE_FILES is the archive's real, ordered file list", () => {
 });
 
 test("an archive assembled from the builders reads back file for file", () => {
-    // The same assembly `exportAllData` performs, minus the Supabase round
-    // trips: every builder's output goes in under its name in the constant's
+    // The same assembly `exportAllData` performs, minus the database reads: every builder's output goes in under its name in the constant's
     // order, and comes back out intact.
     const tz = "Europe/Berlin";
     const contents: Record<string, string> = {
@@ -2061,9 +1489,7 @@ test("an archive assembled from the builders reads back file for file", () => {
         "goals.csv": buildGoalsCsv(goals(), tz),
         "goals_history.csv": buildGoalsHistoryCsv([goalsHistoryRow()], tz),
         "profile.csv": buildProfileCsv(profile(), tz),
-        "account.csv": buildAccountCsv(authUser(), tz),
-        "telemetry.csv": buildTelemetryCsv([telemetryRow()], tz),
-        "connections.csv": buildConnectionsCsv([grant()], tz, healthLink()),
+        "connections.csv": buildConnectionsCsv(tz, healthLink()),
         "health_sync.csv": buildHealthSyncCsv([healthDay()], tz),
         "README.txt": buildExportReadme(README_OPTS),
     };
@@ -2095,35 +1521,11 @@ test("an archive assembled from the builders reads back file for file", () => {
         "weight.csv",
         "body_measurements.csv",
         "goals_history.csv",
-        "account.csv",
-        "telemetry.csv",
         "connections.csv",
         "health_sync.csv",
     ] as const) {
         expect(contents[csv]!.split("\n")[0]).not.toBe("");
     }
-});
-
-// A client's registered name is whatever its registrant typed; a spreadsheet
-// would run "=…" as a formula when the user opens their own export.
-test("connections.csv defuses a formula in client-chosen text", () => {
-    const f = fieldsByName(
-        buildConnectionsCsv(
-            [
-                {
-                    kind: "refresh_token",
-                    client_id: "c1",
-                    client_name: '=HYPERLINK("https://evil.example","x")',
-                    redirect_uri: "https://client.example/cb",
-                    created_at: "2026-09-27T10:00:00.000Z",
-                    expires_at: "2026-12-26T10:00:00.000Z",
-                },
-            ],
-            "UTC",
-        ),
-    );
-    expect(f.client_name!.startsWith("'=")).toBe(true);
-    expect(f.redirect_uri).toBe("https://client.example/cb");
 });
 
 // ---------- Apple Health sync: health_sync.csv and the connections row ----------
@@ -2161,13 +1563,11 @@ function healthDay(over: Partial<HealthSyncDayRow> = {}): HealthSyncDayRow {
 }
 
 test("the health_sync link is one connections row of its own kind, never its token", () => {
-    const csv = buildConnectionsCsv([grant()], "Europe/Berlin", healthLink());
-    expect(parseCsv(csv)).toHaveLength(3);
-    expect(fieldsByName(csv, 2)).toEqual({
+    const csv = buildConnectionsCsv("Europe/Berlin", healthLink());
+    expect(parseCsv(csv)).toHaveLength(2);
+    expect(fieldsByName(csv, 1)).toEqual({
         kind: "health_sync",
-        client_id: "nutrition-mcp-health-sync",
-        client_name: "Apple Health sync (iOS Shortcut)",
-        redirect_uri: "",
+        name: "Apple Health sync (iOS Shortcut)",
         created_at: "2026-09-27 08:00:00",
         expires_at: "2026-12-31 06:10:00",
         last_used_at: "2026-10-02 07:10:00",
@@ -2184,7 +1584,6 @@ test("the health_sync link is one connections row of its own kind, never its tok
 test("a never-used, never-synced link leaves those cells empty", () => {
     const f = fieldsByName(
         buildConnectionsCsv(
-            [],
             "UTC",
             healthLink({
                 last_used_at: null,
@@ -2267,68 +1666,177 @@ test("the README describes health_sync.csv, its own-zone rows and its retention"
     expect(readme).toContain("kept for 8 days");
     expect(readme).toContain('its own "timezone"');
     expect(readme).toContain("except in health_sync.csv");
-    expect(readme).toContain('kind "health_sync"');
+    expect(readme).toContain("Apple Health shortcut links");
     expect(readme).toContain("water_ml are millilitres");
     expect(readme).toContain("Alcohol is never sent");
     // The token and the bookkeeping are named among what is NOT exported.
-    expect(readme).toContain("the Apple Health sync token");
+    expect(readme).toContain("link tokens");
     expect(readme).toContain("Apple Health sync connect request");
 });
 
-// exportAllData reads everything else through supabase.ts, which these tests
-// do not stub; it is driven only far enough to prove the health-sync store is
-// consulted and its failure is not swallowed into a partial archive.
-test("exportAllData asks the injected stores and fails loudly with them", async () => {
-    const asked: string[] = [];
-    const store = {
-        getLinkStatus: async (userId: string) => {
-            asked.push(`link:${userId}`);
-            return null;
-        },
-        getDaysForExport: async (userId: string) => {
-            asked.push(`days:${userId}`);
-            throw new Error(
-                "health sync days: result would be truncated (64 of 65)",
-            );
-        },
-    } as unknown as HealthSyncStore;
-    const envBefore = {
-        url: process.env.SUPABASE_URL,
-        key: process.env.SUPABASE_SECRET_KEY,
-    };
-    process.env.SUPABASE_URL ??= "http://supabase.test";
-    process.env.SUPABASE_SECRET_KEY ??= "test-key";
-    // Every other reader is refused here rather than reaching a real project.
-    const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
-        (async () =>
-            new Response("[]", {
-                status: 200,
-                headers: {
-                    "content-type": "application/json",
-                    "content-range": "*/0",
-                },
-            })) as unknown as typeof fetch,
-    );
-    try {
+// exportAllData reads everything else from the (in-memory) database; the
+// health-sync store is injected only to prove it is consulted and that its
+// failure is not swallowed into a partial archive.
+describe("exportAllData", () => {
+    useMemoryDb();
+    let dir: string;
+    beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "exp-"));
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    test("asks the injected stores and fails loudly with them", async () => {
+        const asked: string[] = [];
+        const store = {
+            getLinkStatus: async (userId: string) => {
+                asked.push(`link:${userId}`);
+                return null;
+            },
+            getDaysForExport: async (userId: string) => {
+                asked.push(`days:${userId}`);
+                throw new Error(
+                    "health sync days: result would be truncated (64 of 65)",
+                );
+            },
+        } as unknown as HealthSyncStore;
         await expect(
             exportAllData("user-9", {
                 healthSync: store,
+                dataDir: dir,
+                secret: "s".repeat(32),
                 getGoalsHistory: async (userId: string) => {
                     asked.push(`goals-history:${userId}`);
                     return [];
                 },
             }),
         ).rejects.toThrow("result would be truncated");
-    } finally {
-        fetchSpy.mockRestore();
-        if (envBefore.url === undefined) delete process.env.SUPABASE_URL;
-        if (envBefore.key === undefined) delete process.env.SUPABASE_SECRET_KEY;
-    }
-    expect(asked.sort()).toEqual([
-        "days:user-9",
-        "goals-history:user-9",
-        "link:user-9",
-    ]);
+        expect(asked.sort()).toEqual([
+            "days:user-9",
+            "goals-history:user-9",
+            "link:user-9",
+        ]);
+    });
+
+    test("an owner with nothing stored gets no archive and no link", async () => {
+        const r = await exportAllData(OWNER_ID, {
+            dataDir: dir,
+            secret: "s".repeat(32),
+        });
+        expect(r.path).toBeUndefined();
+        expect(r.url).toBeUndefined();
+        expect(existsSync(join(dir, "exports"))).toBe(false);
+    });
+
+    test("writes the real ZIP under DATA_DIR/exports and returns a verifiable, expiring link", async () => {
+        await insertMeal(OWNER_ID, {
+            description: "porridge",
+            meal_type: "breakfast",
+            calories: 300,
+            logged_at: "2026-03-14T08:00:00.000Z",
+        });
+        await insertWater(OWNER_ID, {
+            amount_ml: 250,
+            logged_at: "2026-03-14T09:00:00.000Z",
+        });
+        const secret = "k".repeat(32);
+        const now = new Date("2026-03-14T10:00:00.000Z");
+        const r = await exportAllData(OWNER_ID, {
+            dataDir: dir,
+            secret,
+            now,
+        });
+        expect(r.counts).toMatchObject({ meals: 1, water: 1 });
+        expect(r.path).toMatch(/^\/exports\/download\?exp=\d+&sig=[\w-]+$/);
+
+        const rel = exportArchivePath(OWNER_ID);
+        const file = join(dir, "exports", rel);
+        const entries = readZipEntries(new Uint8Array(readFileSync(file)));
+        expect(entries.map((e) => e.name)).toEqual([...EXPORT_ARCHIVE_FILES]);
+        expect(entries.find((e) => e.name === "meals.csv")!.content).toContain(
+            "porridge",
+        );
+        // The archive holds no account, telemetry or OAuth material.
+        expect(entries.some((e) => /account|telemetry/.test(e.name))).toBe(
+            false,
+        );
+
+        const q = new URL(r.path!, "http://x").searchParams;
+        expect(
+            verifyExportLink(secret, rel, q.get("exp")!, q.get("sig")!, now),
+        ).toBe(true);
+        // wrong secret, tampered expiry, other path, and after the hour: all refused
+        expect(
+            verifyExportLink(
+                "z".repeat(32),
+                rel,
+                q.get("exp")!,
+                q.get("sig")!,
+                now,
+            ),
+        ).toBe(false);
+        expect(
+            verifyExportLink(
+                secret,
+                rel,
+                String(Number(q.get("exp")) + 1),
+                q.get("sig")!,
+                now,
+            ),
+        ).toBe(false);
+        expect(
+            verifyExportLink(
+                secret,
+                "other/file.zip",
+                q.get("exp")!,
+                q.get("sig")!,
+                now,
+            ),
+        ).toBe(false);
+        expect(
+            verifyExportLink(
+                secret,
+                rel,
+                q.get("exp")!,
+                q.get("sig")!,
+                new Date(now.getTime() + 61 * 60_000),
+            ),
+        ).toBe(false);
+    });
+
+    test("a second export overwrites the first (one archive per owner)", async () => {
+        await insertWater(OWNER_ID, {
+            amount_ml: 100,
+            logged_at: "2026-03-14T09:00:00.000Z",
+        });
+        const opts = { dataDir: dir, secret: "k".repeat(32) };
+        await exportAllData(OWNER_ID, opts);
+        await insertWater(OWNER_ID, {
+            amount_ml: 200,
+            logged_at: "2026-03-14T10:00:00.000Z",
+        });
+        await exportAllData(OWNER_ID, opts);
+        const files = readdirSync(join(dir, "exports", OWNER_ID));
+        expect(files).toEqual(["nutrition-mcp-export.zip"]);
+    });
+
+    test("PUBLIC_URL, when set, prefixes the returned url", async () => {
+        await insertWater(OWNER_ID, {
+            amount_ml: 100,
+            logged_at: "2026-03-14T09:00:00.000Z",
+        });
+        const prev = process.env.PUBLIC_URL;
+        process.env.PUBLIC_URL = "https://food.example.org/";
+        try {
+            const r = await exportAllData(OWNER_ID, {
+                dataDir: dir,
+                secret: "k".repeat(32),
+            });
+            expect(r.url).toBe(`https://food.example.org${r.path}`);
+        } finally {
+            if (prev === undefined) delete process.env.PUBLIC_URL;
+            else process.env.PUBLIC_URL = prev;
+        }
+    });
 });
 
 // ---------- provenance columns ----------
