@@ -8,20 +8,18 @@ const WINDOW_MS = 60_000;
 // APIs, not to ration normal use. Tool calls in one chat turn arrive in bursts.
 export const MCP_LIMIT_PER_WINDOW = 600;
 const LIMIT_PER_WINDOW = MCP_LIMIT_PER_WINDOW;
-// Per-owner limit for the Apple Health sync API (/pending, /ack, /revoke),
-// keyed by owner like LIMIT_PER_WINDOW. A full sync is one /pending, one
-// /ack per entry (at most one entry per day of the 7-day window) and a final
-// done:true /ack — at most 9 requests — so this leaves room for a retried run
-// without letting a looping shortcut hammer the meal reads behind /pending.
+// Per-owner limit for the Apple Health sync API (every route under
+// /api/v1/health-sync). One hourly run is a /pending, an /ack per entry (at most
+// one per day of the 7-day window) and an activity post, so this leaves room
+// for a retried run without letting a looping shortcut hammer the meal reads.
 export const HEALTH_SYNC_LIMIT_PER_WINDOW = 40;
 const SWEEP_INTERVAL_MS = 5 * 60_000;
 
-// Strike-based banning for IPs that keep failing authentication. A sliding
-// window alone can't distinguish "client with a stale token retrying" from
-// "attacker enumerating credentials", so we count *consecutive* failures: any
-// successful auth from the IP wipes the slate. That's what keeps a corporate
-// NAT — one broken client sharing an egress IP with real users — off the ban
-// list, since its successes keep interrupting the run of failures.
+// Strike-based banning for addresses that keep presenting a wrong key. A
+// sliding window alone can't tell a client with a stale key retrying from an
+// attacker guessing, so we count *consecutive* failures: any request with the
+// right key from that address wipes the slate, which keeps a household whose
+// phone shares an address with a broken client off the ban list.
 const BAN_STRIKE_THRESHOLD = 20;
 // The failure map is bounded. Client addresses are attacker-influenced strings
 // (a forged X-Forwarded-For, or an IPv6 /64 full of addresses), so without a cap
@@ -147,7 +145,7 @@ export function checkRateLimit(userId: string): RateLimitResult {
     return slidingWindow(buckets, userId, LIMIT_PER_WINDOW);
 }
 
-// Per-user limiter for the Apple Health sync API, keyed by user id.
+// Per-owner limiter for the Apple Health sync API.
 export function checkHealthSyncRateLimit(userId: string): RateLimitResult {
     return slidingWindow(
         healthSyncBuckets,

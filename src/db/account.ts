@@ -11,12 +11,6 @@ export function exportArchivePath(userId: string): string {
     return `${userId}/nutrition-mcp-export.zip`;
 }
 
-/** Every export file name an export may have left for this owner, current and
- *  historical. Add, never replace: a name missed here survives deletion. */
-export function exportStoragePaths(userId: string): string[] {
-    return [exportArchivePath(userId), `${userId}/meals.csv`];
-}
-
 /**
  * Tables holding owner data, children before parents. (Foreign keys would
  * cascade anyway; naming every table keeps each one in the deletion record.)
@@ -41,8 +35,8 @@ const OWNER_TABLES = [
 
 /**
  * Deletes every row of this owner in ONE transaction: all or nothing. Export
- * archives live on disk, outside the database; removing the files named by
- * exportStoragePaths is the caller's job (and cannot be part of the
+ * archives live on disk, outside the database; removing the export archive
+ * (exports/ under DATA_DIR) is the caller's job (and cannot be part of the
  * transaction).
  */
 export async function deleteAllUserData(userId: string): Promise<void> {

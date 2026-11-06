@@ -274,6 +274,9 @@ if (import.meta.main) {
         // Long-lived requests can idle between events; Bun's 10 s default
         // closes them. Raise it so a slow tool call is not severed.
         idleTimeout: 120,
+        // The largest legitimate body is a 50-row bulk import (well under
+        // 100 KiB); 1 MiB bounds what an unauthenticated POST can make us buffer.
+        maxRequestBodySize: 1 << 20,
         fetch: (req, server) =>
             app.fetch(req, { ip: server.requestIP(req)?.address }),
     });

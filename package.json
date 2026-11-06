@@ -15,12 +15,12 @@
         "claude",
         "model-context-protocol"
     ],
-    "module": "index.ts",
     "type": "module",
     "private": true,
     "devDependencies": {
         "@modelcontextprotocol/client": "^2.4.0",
-        "@types/bun": "latest"
+        "@types/bun": "latest",
+        "prettier": "^3.9.10"
     },
     "peerDependencies": {
         "typescript": "^5.9.3"
@@ -38,7 +38,6 @@
     "dependencies": {
         "@modelcontextprotocol/server": "^2.4.0",
         "hono": "^4.13.14",
-        "prettier": "^3.9.10",
         "zod": "^4.6.7"
     }
 }

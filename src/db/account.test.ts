@@ -6,7 +6,6 @@ import {
     createSqliteHealthSyncStore,
     deleteAllUserData,
     exportArchivePath,
-    exportStoragePaths,
     insertActiveCalories,
     insertBodyMeasurement,
     insertMeal,
@@ -162,15 +161,6 @@ describe("foreign keys", () => {
                 )
                 .run(USER),
         ).toThrow(/FOREIGN KEY/);
-    });
-});
-
-describe("export file names", () => {
-    test("exportStoragePaths always includes the current archive and the legacy csv", () => {
-        expect(exportStoragePaths(USER)).toEqual([
-            exportArchivePath(USER),
-            `${USER}/meals.csv`,
-        ]);
     });
 });
 

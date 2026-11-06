@@ -15,7 +15,6 @@ import {
     assertWindowComplete,
     isUuid,
     exportArchivePath,
-    exportStoragePaths,
     type Meal,
     type MealInput,
     type Profile,
@@ -546,28 +545,6 @@ describe("timezoneFromProfile", () => {
 });
 
 // ---------- export storage keys ----------
-
-// Deleting an account must not leave the export archive behind: it holds the
-// user's entire history, `storage.remove` reports a missing path as success,
-// and the signed URL they were handed keeps resolving for the rest of its
-// hour. So the deletion list is asserted against the path the writer actually
-// uses — the two were spelled out separately once, and renaming the archive
-// from meals.csv to the .zip silently orphaned a full copy of everyone's data.
-describe("exportStoragePaths", () => {
-    test("covers the archive the exporter writes", () => {
-        expect(exportStoragePaths("u1")).toContain(exportArchivePath("u1"));
-    });
-
-    test("keeps the pre-ZIP meals.csv so old exports are still cleaned up", () => {
-        expect(exportStoragePaths("u1")).toContain("u1/meals.csv");
-    });
-
-    test("scopes every key to the user's own folder", () => {
-        for (const path of exportStoragePaths("u1")) {
-            expect(path.startsWith("u1/")).toBe(true);
-        }
-    });
-});
 
 /** An in-memory paged source, standing in for a `.range(from, to)` query. */
 function paged<T>(rows: T[]) {
