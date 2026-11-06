@@ -25,7 +25,7 @@
 // is a self-contained diff instead of one shared file several agents would
 // race on.
 
-import type { SiteLocale } from "../routes.js";
+import type { SiteLocale } from "../locales.js";
 import { WIDGET_STRINGS_DE } from "./widgets.de.js";
 import { WIDGET_STRINGS_ES } from "./widgets.es.js";
 import { WIDGET_STRINGS_FR } from "./widgets.fr.js";
@@ -43,8 +43,8 @@ import { WIDGET_STRINGS_TR } from "./widgets.tr.js";
  * also falls back to "other" when Intl.PluralRules is unavailable, and the
  * genitive plural is the safest single form. plural() falls back to "other"
  * for any category a value doesn't have. A pragmatic simplification, consistent with the rest of
- * this codebase's translations being AI-generated with no human review pass
- * — see the TRANSLATION_NOTICE in src/routes.ts. Every form still receives
+ * this codebase's translations being AI-generated with no human review pass.
+ * Every form still receives
  * the actual {n}, so the number itself is always correct even where the
  * grammatical form is approximate. */
 export interface PluralForms {

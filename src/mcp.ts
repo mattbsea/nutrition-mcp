@@ -105,7 +105,7 @@ import {
     LoggedAtError,
     resolveWriteLoggedAt,
 } from "./tz.js";
-import { SITE_LOCALES, LOCALE_NAMES, type SiteLocale } from "./routes.js";
+import { SITE_LOCALES, LOCALE_NAMES, type SiteLocale } from "./locales.js";
 import {
     buildDailyBuckets,
     computeTrends,

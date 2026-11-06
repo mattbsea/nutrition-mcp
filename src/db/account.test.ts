@@ -204,8 +204,8 @@ describe("export file names", () => {
     });
 });
 
-describe("owner predicate is injection-safe", () => {
-    test("a hostile userId matches nothing and damages nothing", async () => {
+describe("a hostile owner id is only ever a bound parameter", () => {
+    test("a hostile userId matches nothing and damages nothing (the dynamic column and IN lists are covered by the whitelist tests in meals/logs)", async () => {
         await populate(USER);
         const evil = "x' OR '1'='1";
         const { getAllMeals, getAllWater, countMeals, deleteMeal } =

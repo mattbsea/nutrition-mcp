@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -272,5 +272,57 @@ describe("raw Database without the runtime support is refused with a clear messa
             query: { value: () => ({ get: () => ({ v: "3.36.0" }) }) },
         }) as Database;
         expect(() => assertRuntimeSupport(fake)).toThrow(/STRICT/);
+    });
+});
+
+describe("review leftovers", () => {
+    useMemoryDb();
+
+    test("updateMeal onto another meal's derived idempotency key fails as a write failure, changing nothing", async () => {
+        const base = {
+            meal_type: "lunch" as const,
+            logged_at: "2026-03-14T10:00:00.000Z",
+        };
+        const a = await insertMeal(USER, {
+            ...base,
+            description: "soup",
+            calories: 100,
+        });
+        await insertMeal(USER, { ...base, description: "soup", calories: 200 });
+        // Editing a's calories to 200 recomputes its auto key to b's key.
+        await expect(
+            updateMeal(USER, a.meal.id, { calories: 200 }),
+        ).rejects.toThrow(/Failed to update meal: .*UNIQUE/);
+        expect((await getMealById(USER, a.meal.id))!.calories).toBe(100);
+    });
+
+    test("updateMeal clears provenance with an explicit null", async () => {
+        const { meal } = await insertMeal(USER, {
+            description: "x",
+            meal_type: "lunch",
+            nutrient_sources: { calories: { s: "estimate" } } as never,
+            source_detail: { "usda:1": { name: "Oats" } } as never,
+        });
+        const cleared = await updateMeal(USER, meal.id, {
+            nutrient_sources: null,
+            source_detail: null,
+        });
+        expect(cleared.nutrient_sources).toBeNull();
+        expect(cleared.source_detail).toBeNull();
+    });
+
+    test("closeDb on a file database checkpoints the WAL (only the .db file is left)", () => {
+        const dir = mkdtempSync(join(tmpdir(), "nutdb-"));
+        try {
+            const db = openDb(join(dir, "n.db"));
+            db.query(
+                "INSERT INTO water_log (user_id, amount_ml) VALUES ('local-owner', 100)",
+            ).run();
+            db.close();
+            const left = readdirSync(dir).sort();
+            expect(left).toEqual(["n.db"]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

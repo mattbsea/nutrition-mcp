@@ -5,7 +5,7 @@
 // out of the source text and evaluated with the constants they read, the way
 // macros.test.ts evaluates shared/macros.js.
 import { describe, expect, test } from "bun:test";
-import { LOCALES, SITE_LOCALES } from "../../src/routes";
+import { LOCALES, SITE_LOCALES } from "../../src/locales";
 import { WIDGET_STRINGS } from "../../src/copy/widgets";
 import { RATE_DENSITY_DAYS, RATE_MIN_WEIGHINS } from "../../src/weight-trend";
 

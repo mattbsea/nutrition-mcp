@@ -45,7 +45,7 @@ const healthSyncBuckets = new Map<string, number[]>();
 
 // Periodically drop buckets whose newest entry is older than the window, so
 // a caller who stops making requests doesn't keep a slot in the Map forever.
-setInterval(() => {
+const sweepTimer = setInterval(() => {
     const now = Date.now();
     const cutoff = now - WINDOW_MS;
     for (const map of [buckets, healthSyncBuckets]) {
@@ -68,6 +68,8 @@ setInterval(() => {
         }
     }
 }, SWEEP_INTERVAL_MS);
+// A sweep timer must never keep a script or a test process alive.
+sweepTimer.unref?.();
 
 export interface RateLimitResult {
     allowed: boolean;

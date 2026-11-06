@@ -157,7 +157,9 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
     }
 
     // Liveness for the supervisor. Gated by the shutdown gate on purpose.
-    app.get("/health", (c) => c.text("ok"));
+    app.get("/health", (c) =>
+        c.body("ok", 200, { "Content-Type": "text/plain; charset=utf-8" }),
+    );
 
     // "/" is the dashboard login in step C. Until then, the generic 404.
     app.notFound((c) => notFound(c));
@@ -175,8 +177,8 @@ function startupKeyLine(keys: KeyStore): string {
     if (keys.mcpKeyFromEnv)
         return "[keys] MCP access key taken from the MCP_KEY environment variable";
     if (keys.mcpKeyGenerated)
-        return `[keys] generated a new MCP access key and saved it to ${keys.file} (field "mcp_key"); the connector URL is /mcp/<that key>`;
-    return `[keys] MCP access key loaded from ${keys.file} (field "mcp_key"); the connector URL is /mcp/<that key>`;
+        return `[keys] generated a new MCP access key and saved it to ${keys.file} (field "mcp_key"); the connector URL is your public origin followed by /mcp/ and that key`;
+    return `[keys] MCP access key loaded from ${keys.file} (field "mcp_key"); the connector URL is your public origin followed by /mcp/ and that key`;
 }
 
 /**
@@ -238,24 +240,21 @@ function shutdown(signal: string): void {
 const port = parseInt(process.env.PORT || "8080");
 const hostname = process.env.HOST || "0.0.0.0";
 
-// Boot side effects run only when this file IS the entrypoint, so a test can
-// import createApp without opening the production database or starting timers.
-const app = import.meta.main ? await boot() : null;
+// Boot side effects (and the listener) run only when this file IS the
+// entrypoint, so a test can import createApp without opening the production
+// database, starting timers or binding a port. Bun.serve is called explicitly
+// rather than through a default export: Bun's implicit serve of a default
+// export started a second listener under a top-level await.
 if (import.meta.main) {
+    const app = await boot();
+    Bun.serve({
+        port,
+        hostname,
+        // Long-lived requests can idle between events; Bun's 10 s default
+        // closes them. Raise it so a slow tool call is not severed.
+        idleTimeout: 120,
+        fetch: (req, server) =>
+            app.fetch(req, { ip: server.requestIP(req)?.address }),
+    });
     console.log(`Nutrition MCP server listening on ${hostname}:${port}`);
 }
-
-export default {
-    port,
-    hostname,
-    // Long-lived requests can idle between events; Bun's 10 s default closes
-    // them. Raise it so a slow tool call is not severed.
-    idleTimeout: 120,
-    fetch(
-        req: Request,
-        server: { requestIP(r: Request): { address: string } | null },
-    ) {
-        if (!app) return new Response("not started", { status: 503 });
-        return app.fetch(req, { ip: server.requestIP(req)?.address });
-    },
-};
