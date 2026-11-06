@@ -1021,5 +1021,12 @@ describe("the health-sync lines in the log", () => {
             "[health-sync] route=pending result=busy",
             "[health-sync] route=ack result=bad_request",
         ]);
+        await get(`${API}/pending`, { key: "nope" });
+        const denied = [...warnSpy.mock.calls]
+            .map((c: unknown[]) => c.map(String).join(" "))
+            .filter((l: string) => l.includes("unauthorized"));
+        expect(denied).toEqual([
+            "[health-sync] route=pending result=unauthorized",
+        ]);
     });
 });

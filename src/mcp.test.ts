@@ -61,6 +61,7 @@ import {
     WEIGHT_RANGE_MAX_DAYS,
     BODY_MEASUREMENT_RANGE_MAX_DAYS,
     healthSyncProfileLine,
+    healthActivityProfileLine,
     updatedAddedSugarError,
     ceilingAverageLine,
     addedSugarRequiredNow,
@@ -121,6 +122,7 @@ function storedMoved(row: object, guard: object): boolean {
     );
 }
 import { setToolObserver } from "./tool-runner.js";
+import type { HealthSyncStateRow } from "./db/repo.js";
 import { OWNER_ID } from "./db/owner.js";
 import {
     existsSync,
@@ -1753,8 +1755,7 @@ const db = {
     dedupe: false,
     // get_profile's Apple Health sync status, as the health-sync store reads
     // it through the repo: the link row, and the latest acked date.
-    healthSyncLink: null as Record<string, unknown> | null,
-    healthSyncSentThrough: null as string | null,
+    healthSyncState: null as HealthSyncStateRow | null,
     // update_meal's reads of a stored meal's sugar pair: 0 when both sugar
     // fields were passed, so the check needed no read.
     storedMealReads: 0,
@@ -1802,16 +1803,13 @@ mock.module("./db/repo.js", () => ({
     ...actualRepo,
     // get_profile reads the Apple Health link status through these stores.
     createSqliteHealthSyncStore: () => ({
-        getLinkStatus: async () =>
-            db.healthSyncLink
-                ? {
-                      ...db.healthSyncLink,
-                      sent_through: db.healthSyncSentThrough,
-                  }
-                : null,
-    }),
-    createSqliteHealthActivityLinkStore: () => ({
-        getActivityLinkStatus: async () => null,
+        getState: async () =>
+            db.healthSyncState ?? {
+                lease_until: null,
+                last_sync_at: null,
+                last_ack_at: null,
+                last_activity_at: null,
+            },
     }),
     deleteAllUserData: async () => {
         db.accountWipes += 1;
@@ -2243,8 +2241,7 @@ beforeEach(() => {
     db.profile = { ...PROFILE_BASE };
     db.sameDayMeals = [];
     db.goals = null;
-    db.healthSyncLink = null;
-    db.healthSyncSentThrough = null;
+    db.healthSyncState = null;
     db.storedMealReads = 0;
     db.mealUpdateGuards = [];
     db.concurrentMealEdit = null;
@@ -6540,32 +6537,32 @@ describe("current-time disclosure", () => {
         });
     });
 
-    test("get_profile reports Apple Health sync as not connected", async () => {
+    test("get_profile says no shortcut has checked in yet", async () => {
         await withTools(null, async (call) => {
-            expect(textOf(await call("get_profile"))).toContain(
-                "Apple Health sync: not connected.",
+            const text = textOf(await call("get_profile"));
+            expect(text).toContain(
+                "Apple Health sync: no shortcut has checked in yet.",
             );
+            expect(text).not.toContain("activity sync");
         });
     });
 
-    test("get_profile reports a connected Apple Health sync in local time", async () => {
+    test("get_profile reports the sync clocks in local time", async () => {
         db.profile = { ...PROFILE_BASE, timezone: "Europe/Kyiv" };
-        db.healthSyncLink = {
-            kind: "shortcut",
-            fields: ["energy_kcal"],
-            fallback_tz: "Europe/Kyiv",
-            sync_start_date: "2026-09-26",
-            created_at: "2026-09-26T22:30:00.000Z",
-            last_used_at: "2026-10-02T05:10:00.000Z",
+        db.healthSyncState = {
+            lease_until: null,
             last_sync_at: "2026-10-02T05:10:30.000Z",
-            expires_at: "2026-12-31T05:10:00.000Z",
+            last_ack_at: "2026-10-02T04:10:00.000Z",
+            last_activity_at: "2026-10-02T05:12:00.000Z",
         };
-        db.healthSyncSentThrough = "2026-10-01";
         await withTools(null, async (call) => {
             const text = textOf(await call("get_profile"));
-            // 22:30Z on the 26th is already the 27th in Kyiv.
+            // Kyiv is UTC+3 in early October.
             expect(text).toContain(
-                "Apple Health sync: connected 2026-09-27, sent through 2026-10-01, last sync 2026-10-02 08:10.",
+                "Apple Health sync: last check 2026-10-02 08:10, last values written to Health 2026-10-02 07:10.",
+            );
+            expect(text).toContain(
+                "Apple Health activity sync: reads the daily Active Energy total, last sync 2026-10-02 08:12.",
             );
         });
     });
@@ -6725,7 +6722,7 @@ describe("export_all_data is on the tool surface", () => {
             "goals.csv",
             "goals_history.csv",
             "profile.csv",
-            "connections.csv",
+            "health_sync_status.csv",
             "README.txt",
         ]) {
             expect(desc, file).toContain(file);
@@ -8932,44 +8929,58 @@ describe("get_trends group_by", () => {
 // ---------- get_profile's Apple Health sync line, and the delete text ----------
 
 describe("healthSyncProfileLine", () => {
-    const link = {
-        kind: "shortcut" as const,
-        fields: ["energy_kcal"],
-        fallback_tz: null,
-        sync_start_date: "2026-09-26",
-        created_at: "2026-09-27T06:00:00.000Z",
-        last_used_at: null,
+    const state = {
+        lease_until: null,
         last_sync_at: null,
-        expires_at: "2026-12-26T06:00:00.000Z",
-        sent_through: null,
+        last_ack_at: null,
+        last_activity_at: null,
     };
 
-    test("says plainly when nothing is connected or the status is unreadable", () => {
-        expect(healthSyncProfileLine(null, "UTC")).toBe(
-            "Apple Health sync: not connected.",
+    test("says plainly when nothing has checked in or the status is unreadable", () => {
+        expect(healthSyncProfileLine(state, "UTC")).toBe(
+            "Apple Health sync: no shortcut has checked in yet.",
         );
         expect(healthSyncProfileLine(undefined, "UTC")).toBe(
             "Apple Health sync: status unavailable right now.",
         );
     });
 
-    test("a link that has not synced yet says so instead of inventing dates", () => {
-        expect(healthSyncProfileLine(link, "America/New_York")).toBe(
-            "Apple Health sync: connected 2026-09-27, sent through nothing yet, last sync never.",
+    test("a shortcut that checked in but never wrote says so instead of inventing dates", () => {
+        expect(
+            healthSyncProfileLine(
+                { ...state, last_sync_at: "2026-10-02T05:10:30.000Z" },
+                "America/New_York",
+            ),
+        ).toBe(
+            "Apple Health sync: last check 2026-10-02 01:10, last values written to Health never.",
         );
+    });
+
+    test("the activity line appears only after an activity sync", () => {
+        expect(healthActivityProfileLine(state, "UTC")).toBeNull();
+        expect(healthActivityProfileLine(undefined, "UTC")).toBeNull();
+        expect(
+            healthActivityProfileLine(
+                { ...state, last_activity_at: "2026-10-02T05:12:00.000Z" },
+                "UTC",
+            ),
+        ).toContain("last sync 2026-10-02 05:12");
     });
 
     test("describes, never directs", () => {
         for (const line of [
-            healthSyncProfileLine(null, "UTC"),
+            healthSyncProfileLine(state, "UTC"),
             healthSyncProfileLine(undefined, "UTC"),
-            healthSyncProfileLine(link, "UTC"),
+            healthSyncProfileLine(
+                { ...state, last_sync_at: "2026-10-02T05:10:30.000Z" },
+                "UTC",
+            ),
         ])
             expect(line).not.toMatch(/\b(call|offer|ask|tell|suggest)\b/i);
     });
 });
 
-test("delete_account names the Apple Health sync connection and its record", async () => {
+test("delete_account names the Apple Health sync record", async () => {
     const server = new McpServer(
         { name: "t", version: "0.0.0" },
         { capabilities: { tools: {}, resources: {} } },
@@ -8983,8 +8994,7 @@ test("delete_account names the Apple Health sync connection and its record", asy
     await server.close();
     const desc =
         tools.find((t) => t.name === "delete_account")?.description ?? "";
-    expect(desc).toContain("Apple Health sync connection");
-    expect(desc).toContain("record of values sent");
+    expect(desc).toContain("Apple Health sync record");
 });
 
 // ---------- added sugar reaches the widgets through _meta ----------

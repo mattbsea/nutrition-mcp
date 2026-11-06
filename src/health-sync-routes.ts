@@ -274,8 +274,9 @@ export function createHealthSyncRouter(deps: HealthSyncRouterDeps) {
 
     // Key check (and the shared ban) for every route, in the envelope.
     const auth = bearerKeyGuard(deps.key, {
-        unauthorized: (c) =>
-            c.json(
+        unauthorized: (c) => {
+            (c as Context<Env>).get("hsNote").result = "unauthorized";
+            return c.json(
                 {
                     ok: false,
                     error: "unauthorized",
@@ -283,9 +284,11 @@ export function createHealthSyncRouter(deps: HealthSyncRouterDeps) {
                 },
                 401,
                 { ...API_HEADERS, "WWW-Authenticate": 'Bearer realm="food"' },
-            ),
-        banned: (c, retryAfter) =>
-            c.json(
+            );
+        },
+        banned: (c, retryAfter) => {
+            (c as Context<Env>).get("hsNote").result = "rate_limited";
+            return c.json(
                 {
                     ok: false,
                     error: "rate_limited",
@@ -293,7 +296,8 @@ export function createHealthSyncRouter(deps: HealthSyncRouterDeps) {
                 },
                 429,
                 { ...API_HEADERS, "Retry-After": String(retryAfter) },
-            ),
+            );
+        },
     });
 
     // Per-owner request budget, after the key is accepted.

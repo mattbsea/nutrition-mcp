@@ -15,6 +15,7 @@ import { useMemoryDb } from "./db/test-helpers.js";
 import { signExportLink, writeExportArchive } from "./export-files.js";
 
 const KEY = "k-".padEnd(64, "A1b2C3d4");
+const SKEY = "sc-".padEnd(60, "Z9y8");
 const SECRET = "export-secret-".padEnd(48, "Z");
 const IP = "198.51.100.7";
 
@@ -31,6 +32,7 @@ beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "idx-"));
     app = createApp({
         mcpKey: () => KEY,
+        shortcutKey: () => SKEY,
         exportSecret: () => SECRET,
         dataDir: dir,
     });
@@ -185,6 +187,7 @@ describe("the MCP key", () => {
         let current = KEY;
         const rotating = createApp({
             mcpKey: () => current,
+            shortcutKey: () => SKEY,
             exportSecret: () => SECRET,
             dataDir: dir,
         });
@@ -384,6 +387,7 @@ describe("the key never reaches a log or a response", () => {
             mcpKey: () => {
                 throw new Error(`boom for /mcp/${KEY}`);
             },
+            shortcutKey: () => SKEY,
             exportSecret: () => SECRET,
             dataDir: dir,
         });
@@ -410,22 +414,25 @@ describe("the rest of the surface", () => {
         expect(await r.json()).toEqual({ error: "not_found" });
     });
 
-    test("every health-sync path answers 501 not_available_yet, whatever the method", async () => {
-        for (const [method, path] of [
-            ["GET", "/api/v1/health-sync/pending"],
-            ["POST", "/api/v1/health-sync/ack"],
-            ["POST", "/api/v1/health-sync/activity"],
-            ["POST", "/api/v1/health-sync/revoke"],
-            ["POST", "/api/v1/health-sync/start"],
-            ["GET", "/api/v1/health-sync"],
-        ] as const) {
-            const r = await call(path, { method });
-            expect(r.status).toBe(501);
-            expect(await r.json()).toEqual({
-                ok: false,
-                error: "not_available_yet",
-            });
-        }
+    test("the health-sync API is mounted behind its own bearer key", async () => {
+        const bare = await call("/api/v1/health-sync/pending");
+        expect(bare.status).toBe(401);
+        expect(await bare.json()).toMatchObject({
+            ok: false,
+            error: "unauthorized",
+        });
+        // The MCP path key is a different credential and opens nothing here.
+        const mcpKeyAsBearer = await call("/api/v1/health-sync/pending", {
+            headers: { authorization: `Bearer ${KEY}` },
+        });
+        expect(mcpKeyAsBearer.status).toBe(401);
+        const ok = await call("/api/v1/health-sync/status", {
+            headers: { authorization: `Bearer ${SKEY}` },
+        });
+        expect(ok.status).toBe(200);
+        expect(await ok.json()).toMatchObject({ ok: true });
+        // And the shortcut key opens nothing at /mcp.
+        expect((await mcpPost(SKEY)).status).toBe(404);
     });
 
     test("/health is a plain ok", async () => {

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-    HEALTH_ACTIVITY_SHORTCUT_NAME,
     HEALTH_ACTIVITY_WINDOW_DAYS,
     parseActivityBody,
     planActivityWrites,
@@ -171,9 +170,5 @@ describe("planActivityWrites", () => {
         });
         expect(plan.writes).toEqual([]);
         expect(plan.through).toBeNull();
-    });
-
-    test("the shortcut name the callback reopens", () => {
-        expect(HEALTH_ACTIVITY_SHORTCUT_NAME).toBe("Nutrition MCP Activity");
     });
 });

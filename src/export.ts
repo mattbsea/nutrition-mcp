@@ -961,9 +961,8 @@ export function buildExportReadme(opts: {
         "-------------------",
         "This archive holds everything this server stores about you. What is not in it:",
         "  * the server runtime log — a short rolling buffer of requests that contains no meal data and never an access key;",
-        "  * values kept only as one-way hashes for security: the Apple Health shortcut link tokens (which also sit, unhashed, in the shortcuts on your own devices);",
-        "  * internal bookkeeping: the de-duplication keys stored beside meals, water, active calories, weight and body measurement entries, and Apple Health sync's lock against two syncs at once, its per-day count of how often a day was offered and its record of which notices were shown;",
-        "  * a pending Apple Health sync connect request, if one exists, which lasts at most 30 minutes.",
+        "  * the access keys (MCP key, shortcut key, export signing secret), which live in the server's data folder and are never part of an export;",
+        "  * internal bookkeeping: the de-duplication keys stored beside meals, water, active calories, weight and body measurement entries, and Apple Health sync's lock against two syncs at once.",
         "",
     ].join("\n");
 }

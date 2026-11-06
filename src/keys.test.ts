@@ -110,4 +110,43 @@ describe("loadKeys", () => {
         expect(k.mcpKey.length).toBe(64);
         expect(k.mcpKeyGenerated).toBe(true);
     });
+
+    test("the shortcut key is generated alongside, 48 bytes, persisted, and distinct from the MCP key", () => {
+        const k = loadKeys(dir, {});
+        expect(k.shortcutKeyGenerated).toBe(true);
+        expect(k.shortcutKeyFromEnv).toBe(false);
+        expect(k.shortcutKey).toMatch(/^[A-Za-z0-9_-]{64}$/);
+        expect(k.shortcutKey).not.toBe(k.mcpKey);
+        expect(read().shortcut_key).toBe(k.shortcutKey);
+        const again = loadKeys(dir, {});
+        expect(again.shortcutKey).toBe(k.shortcutKey);
+        expect(again.shortcutKeyGenerated).toBe(false);
+    });
+
+    test("SHORTCUT_KEY wins and is never written to disk", () => {
+        const env = { SHORTCUT_KEY: "shortcut-from-the-environment-123" };
+        const k = loadKeys(dir, env);
+        expect(k.shortcutKey).toBe(env.SHORTCUT_KEY);
+        expect(k.shortcutKeyFromEnv).toBe(true);
+        expect(JSON.stringify(read())).not.toContain(env.SHORTCUT_KEY);
+        expect(read().shortcut_key).toBeUndefined();
+    });
+
+    test("a too-short SHORTCUT_KEY is refused", () => {
+        expect(() => loadKeys(dir, { SHORTCUT_KEY: "short" })).toThrow(
+            /SHORTCUT_KEY must be at least 16/,
+        );
+    });
+
+    test("the two keys must differ, from any source", () => {
+        const same = "one-secret-for-both-0123456789";
+        expect(() =>
+            loadKeys(dir, { MCP_KEY: same, SHORTCUT_KEY: same }),
+        ).toThrow(/must be different secrets/);
+        // also when only one is from the environment
+        const k = loadKeys(dir, {});
+        expect(() => loadKeys(dir, { SHORTCUT_KEY: k.mcpKey })).toThrow(
+            /must be different secrets/,
+        );
+    });
 });
