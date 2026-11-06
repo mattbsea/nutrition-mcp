@@ -10,12 +10,16 @@ import {
     tokenizeQuery,
     type SavedMealSummary,
 } from "../search.js";
-import { MAX_SAVED_MEALS_PER_USER, type MealItemValues } from "../meal-items.js";
+import {
+    MAX_SAVED_MEALS_PER_USER,
+    type MealItemValues,
+} from "../meal-items.js";
 import { getDb } from "./conn.js";
 import {
     fromJson,
     isUniqueViolation,
     likeAll,
+    normId,
     toJson,
     tx,
     ts,
@@ -96,7 +100,10 @@ function savedMealColumns(input: Partial<SavedMealInput>): Row {
     return out;
 }
 
-function savedMealIdByName(userId: string, name: string | undefined): string | null {
+function savedMealIdByName(
+    userId: string,
+    name: string | undefined,
+): string | null {
     const wanted = name?.trim();
     if (!wanted) return null;
     const row = getDb()
@@ -140,12 +147,22 @@ export async function createSavedMeal(
                     `INSERT INTO saved_meals (${names.join(", ")}) VALUES (${names.map(() => "?").join(", ")}) RETURNING *`,
                 )
                 .get(userId, ...(Object.values(cols) as never[])) as Row;
-            insertItems(db, "saved_meal_items", "saved_meal_id", String(inserted.id), userId, items);
+            insertItems(
+                db,
+                "saved_meal_items",
+                "saved_meal_id",
+                String(inserted.id),
+                userId,
+                items,
+            );
             return inserted;
         });
         return { ...savedMealFromRow(row), items };
     } catch (error) {
-        if (isUniqueViolation(error) && String((error as Error).message).includes("name_key"))
+        if (
+            isUniqueViolation(error) &&
+            String((error as Error).message).includes("saved_meals.name_key")
+        )
             throw new SavedMealNameTaken(savedMealIdByName(userId, input.name));
         throw new Error(
             `Failed to save meal: ${error instanceof Error ? error.message : String(error)}`,
@@ -165,8 +182,10 @@ export async function getSavedMeals(
         sql += " AND ulower(name) LIKE ? ESCAPE '\\'";
         params.push(`%${escapeLikePattern(needle.toLowerCase())}%`);
     }
-    sql += " ORDER BY created_at ASC, id ASC";
-    const rows = getDb().query(sql).all(...(params as never[])) as Row[];
+    sql += " ORDER BY created_at ASC, rowid ASC";
+    const rows = getDb()
+        .query(sql)
+        .all(...(params as never[])) as Row[];
     return withItems(userId, rows.map(savedMealFromRow));
 }
 
@@ -178,7 +197,7 @@ export async function getSavedMeal(
     if (!isUuid(id)) return null;
     const row = getDb()
         .query("SELECT * FROM saved_meals WHERE id = ? AND user_id = ?")
-        .get(id, userId) as Row | null;
+        .get(normId(id), userId) as Row | null;
     if (!row) return null;
     return withItems(userId, [savedMealFromRow(row)])[0] ?? null;
 }
@@ -222,7 +241,10 @@ function applySavedUpdate(
 }
 
 function nameTaken(error: unknown): boolean {
-    return isUniqueViolation(error) && String((error as Error).message).includes("name_key");
+    return (
+        isUniqueViolation(error) &&
+        String((error as Error).message).includes("saved_meals.name_key")
+    );
 }
 
 /** Updates a saved meal's own figures and labels (no items) as one guarded
@@ -236,6 +258,7 @@ export async function updateSavedMealIfUnchanged(
     guard: MealSnapshotGuard,
 ): Promise<SavedMealWithItems | null> {
     if (!isUuid(id)) return null;
+    id = normId(id);
     try {
         const row = tx((db) => {
             const current = db
@@ -247,7 +270,8 @@ export async function updateSavedMealIfUnchanged(
                 nutrient_sources: fromJson(current.nutrient_sources),
                 source_detail: fromJson(current.source_detail),
             };
-            if (!guardMatches(parsed, guard)) throw new SnapshotConflictError(id);
+            if (!guardMatches(parsed, guard))
+                throw new SnapshotConflictError(id);
             return applySavedUpdate(db, userId, id, fields);
         });
         if (!row) return null;
@@ -255,7 +279,9 @@ export async function updateSavedMealIfUnchanged(
     } catch (error) {
         if (error instanceof SnapshotConflictError) throw error;
         if (nameTaken(error))
-            throw new SavedMealNameTaken(savedMealIdByName(userId, fields.name));
+            throw new SavedMealNameTaken(
+                savedMealIdByName(userId, fields.name),
+            );
         throw new Error(
             `Failed to update saved meal: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -271,6 +297,7 @@ export async function updateSavedMeal(
     items: MealItemValues[] | null,
 ): Promise<SavedMealWithItems | null> {
     if (!isUuid(id)) return null;
+    id = normId(id);
     try {
         const row = tx((db) => {
             const updated = applySavedUpdate(db, userId, id, fields);
@@ -279,7 +306,14 @@ export async function updateSavedMeal(
                 db.query(
                     "DELETE FROM saved_meal_items WHERE saved_meal_id = ? AND user_id = ?",
                 ).run(id, userId);
-                insertItems(db, "saved_meal_items", "saved_meal_id", id, userId, items);
+                insertItems(
+                    db,
+                    "saved_meal_items",
+                    "saved_meal_id",
+                    id,
+                    userId,
+                    items,
+                );
             }
             return updated;
         });
@@ -289,7 +323,9 @@ export async function updateSavedMeal(
         return withItems(userId, [saved])[0] ?? null;
     } catch (error) {
         if (nameTaken(error))
-            throw new SavedMealNameTaken(savedMealIdByName(userId, fields.name));
+            throw new SavedMealNameTaken(
+                savedMealIdByName(userId, fields.name),
+            );
         throw new Error(
             `Failed to update saved meal: ${error instanceof Error ? error.message : String(error)}`,
         );
@@ -304,8 +340,10 @@ export async function deleteSavedMeal(
 ): Promise<SavedMeal | null> {
     if (!isUuid(id)) return null;
     const row = getDb()
-        .query("DELETE FROM saved_meals WHERE id = ? AND user_id = ? RETURNING *")
-        .get(id, userId) as Row | null;
+        .query(
+            "DELETE FROM saved_meals WHERE id = ? AND user_id = ? RETURNING *",
+        )
+        .get(normId(id), userId) as Row | null;
     return row ? savedMealFromRow(row) : null;
 }
 
@@ -357,7 +395,9 @@ export async function searchSavedMeals(
         );
     }
 
-    const saved = [...found.values()].sort(bySavedMealName).slice(0, SAVED_MEAL_SEARCH_LIMIT);
+    const saved = [...found.values()]
+        .sort(bySavedMealName)
+        .slice(0, SAVED_MEAL_SEARCH_LIMIT);
     const items = itemsByParent(
         "saved_meal_items",
         "saved_meal_id",
@@ -385,7 +425,9 @@ export async function searchSavedMeals(
 /** Every saved meal of the user, oldest first, as stored. */
 export function getAllSavedMeals(userId: string): Promise<SavedMeal[]> {
     const rows = getDb()
-        .query("SELECT * FROM saved_meals WHERE user_id = ? ORDER BY created_at ASC, id ASC")
+        .query(
+            "SELECT * FROM saved_meals WHERE user_id = ? ORDER BY created_at ASC, rowid ASC",
+        )
         .all(userId) as Row[];
     return Promise.resolve(
         rows.map((r) => {
@@ -400,7 +442,9 @@ export function getAllSavedMeals(userId: string): Promise<SavedMeal[]> {
 }
 
 /** Every saved-meal ingredient of the user, as stored. */
-export function getAllSavedMealItems(userId: string): Promise<SavedMealItemRow[]> {
+export function getAllSavedMealItems(
+    userId: string,
+): Promise<SavedMealItemRow[]> {
     const rows = getDb()
         .query(
             "SELECT * FROM saved_meal_items WHERE user_id = ? ORDER BY saved_meal_id ASC, position ASC, id ASC",

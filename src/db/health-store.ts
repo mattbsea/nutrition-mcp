@@ -43,9 +43,15 @@ const liveSince = (at: Date) =>
     new Date(at.getTime() - HEALTH_SYNC_LINK_MAX_AGE_MS).toISOString();
 
 const pendingFromRow = (r: Row): HealthSyncPendingRow =>
-    ({ ...r, fields: fromJson<string[]>(r.fields) ?? [] }) as unknown as HealthSyncPendingRow;
+    ({
+        ...r,
+        fields: fromJson<string[]>(r.fields) ?? [],
+    }) as unknown as HealthSyncPendingRow;
 const linkFromRow = (r: Row): HealthSyncLinkRow =>
-    ({ ...r, fields: fromJson<string[]>(r.fields) ?? [] }) as unknown as HealthSyncLinkRow;
+    ({
+        ...r,
+        fields: fromJson<string[]>(r.fields) ?? [],
+    }) as unknown as HealthSyncLinkRow;
 const dayFromRow = (r: Row): HealthSyncDayRow =>
     ({
         ...r,
@@ -74,7 +80,9 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
                         ts(input.expiresAt),
                     );
             } catch (error) {
-                throw new Error(`Failed to store pending health sync: ${(error as Error).message}`);
+                throw new Error(
+                    `Failed to store pending health sync: ${(error as Error).message}`,
+                );
             }
         },
 
@@ -87,7 +95,13 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
             return row ? pendingFromRow(row) : null;
         },
 
-        async setPendingClaim(connectId, claimCode, userId, claimExpiresAt, now) {
+        async setPendingClaim(
+            connectId,
+            claimCode,
+            userId,
+            claimExpiresAt,
+            now,
+        ) {
             const res = getDb()
                 .query(
                     `UPDATE health_sync_pending
@@ -113,7 +127,11 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
                      WHERE claim_code_hash = ? AND device_secret_hash = ? AND claim_expires_at > ?
                      RETURNING ${PENDING_COLUMNS}`,
                 )
-                .get(hashSecret(claimCode), hashSecret(deviceSecret), nowIso(now)) as Row | null;
+                .get(
+                    hashSecret(claimCode),
+                    hashSecret(deviceSecret),
+                    nowIso(now),
+                ) as Row | null;
             return row ? pendingFromRow(row) : null;
         },
 
@@ -145,7 +163,9 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
                         ts(link.expiresAt),
                     );
             } catch (error) {
-                throw new Error(`Failed to store health sync link: ${(error as Error).message}`);
+                throw new Error(
+                    `Failed to store health sync link: ${(error as Error).message}`,
+                );
             }
         },
 
@@ -157,7 +177,11 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
                         `SELECT ${LINK_COLUMNS} FROM health_sync_links
                          WHERE token_hash = ? AND expires_at > ? AND created_at > ?`,
                     )
-                    .get(hashSecret(token), at.toISOString(), liveSince(at)) as Row | null;
+                    .get(
+                        hashSecret(token),
+                        at.toISOString(),
+                        liveSince(at),
+                    ) as Row | null;
                 if (!row) return { status: "invalid" };
                 return { status: "valid", link: linkFromRow(row) };
             } catch {
@@ -167,13 +191,17 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
 
         async touchLink(userId, lastUsedAt, expiresAt) {
             getDb()
-                .query("UPDATE health_sync_links SET last_used_at = ?, expires_at = ? WHERE user_id = ?")
+                .query(
+                    "UPDATE health_sync_links SET last_used_at = ?, expires_at = ? WHERE user_id = ?",
+                )
                 .run(ts(lastUsedAt), ts(expiresAt), userId);
         },
 
         async setLastSync(userId, at) {
             getDb()
-                .query("UPDATE health_sync_links SET last_sync_at = ? WHERE user_id = ?")
+                .query(
+                    "UPDATE health_sync_links SET last_sync_at = ? WHERE user_id = ?",
+                )
                 .run(ts(at), userId);
         },
 
@@ -192,7 +220,9 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
         async releaseLease(userId, heldUntil) {
             if (heldUntil === undefined) {
                 getDb()
-                    .query("UPDATE health_sync_links SET lease_until = NULL WHERE user_id = ?")
+                    .query(
+                        "UPDATE health_sync_links SET lease_until = NULL WHERE user_id = ?",
+                    )
                     .run(userId);
                 return;
             }
@@ -249,14 +279,21 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
         async updateDay(userId, date, patch, expect) {
             const cols: Row = {};
             if (patch.timezone !== undefined) cols.timezone = patch.timezone;
-            if (patch.sent_values !== undefined) cols.sent_values = toJson(patch.sent_values);
+            if (patch.sent_values !== undefined)
+                cols.sent_values = toJson(patch.sent_values);
             if (patch.topup_seq !== undefined) cols.topup_seq = patch.topup_seq;
-            if (patch.offer_count !== undefined) cols.offer_count = patch.offer_count;
-            if (patch.notified !== undefined) cols.notified = JSON.stringify(patch.notified);
+            if (patch.offer_count !== undefined)
+                cols.offer_count = patch.offer_count;
+            if (patch.notified !== undefined)
+                cols.notified = JSON.stringify(patch.notified);
             if (patch.first_sent_at !== undefined)
-                cols.first_sent_at = patch.first_sent_at ? ts(patch.first_sent_at) : null;
+                cols.first_sent_at = patch.first_sent_at
+                    ? ts(patch.first_sent_at)
+                    : null;
             if (patch.last_sent_at !== undefined)
-                cols.last_sent_at = patch.last_sent_at ? ts(patch.last_sent_at) : null;
+                cols.last_sent_at = patch.last_sent_at
+                    ? ts(patch.last_sent_at)
+                    : null;
             const names = Object.keys(cols);
             if (names.length === 0) return false;
             const res = getDb()
@@ -265,15 +302,24 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
                      WHERE user_id = ? AND date = ? AND topup_seq = ?
                        AND sent_values IS ${expect.sentNull ? "" : "NOT "}NULL`,
                 )
-                .run(...(Object.values(cols) as never[]), userId, date, expect.topup_seq);
+                .run(
+                    ...(Object.values(cols) as never[]),
+                    userId,
+                    date,
+                    expect.topup_seq,
+                );
             return res.changes > 0;
         },
 
         async deleteLink(userId) {
             // The link first: once it is gone no sync can write another day.
             tx((db) => {
-                db.query("DELETE FROM health_sync_links WHERE user_id = ?").run(userId);
-                db.query("DELETE FROM health_sync_days WHERE user_id = ?").run(userId);
+                db.query("DELETE FROM health_sync_links WHERE user_id = ?").run(
+                    userId,
+                );
+                db.query("DELETE FROM health_sync_days WHERE user_id = ?").run(
+                    userId,
+                );
             });
         },
 
@@ -295,7 +341,10 @@ export function createSqliteHealthSyncStore(): HealthSyncStore {
                 )
                 .get(userId);
             return {
-                ...(link as unknown as Omit<HealthSyncLinkStatus, "sent_through" | "fields">),
+                ...(link as unknown as Omit<
+                    HealthSyncLinkStatus,
+                    "sent_through" | "fields"
+                >),
                 fields: fromJson<string[]>(link.fields) ?? [],
                 sent_through: latest?.date ?? null,
             };
@@ -327,13 +376,17 @@ export const sqliteHealthSyncCleanupStore: HealthSyncCleanupStore = {
 
     async deleteExpiredLinks(nowIso, createdBeforeIso) {
         return getDb()
-            .query("DELETE FROM health_sync_links WHERE expires_at < ? OR created_at < ?")
+            .query(
+                "DELETE FROM health_sync_links WHERE expires_at < ? OR created_at < ?",
+            )
             .run(nowIso, createdBeforeIso).changes;
     },
 
     async deleteExpiredActivityLinks(nowIso, createdBeforeIso) {
         return getDb()
-            .query("DELETE FROM health_activity_links WHERE expires_at < ? OR created_at < ?")
+            .query(
+                "DELETE FROM health_activity_links WHERE expires_at < ? OR created_at < ?",
+            )
             .run(nowIso, createdBeforeIso).changes;
     },
 
@@ -359,13 +412,24 @@ export function createSqliteHealthActivityLinkStore(): HealthActivityLinkStore {
                            created_at = excluded.created_at, last_used_at = NULL, last_sync_at = NULL,
                            expires_at = excluded.expires_at`,
                     )
-                    .run(userId, hashSecret(token), link.fallbackTz, new Date().toISOString(), ts(link.expiresAt));
+                    .run(
+                        userId,
+                        hashSecret(token),
+                        link.fallbackTz,
+                        new Date().toISOString(),
+                        ts(link.expiresAt),
+                    );
             } catch (error) {
-                throw new Error(`Failed to store activity sync link: ${(error as Error).message}`);
+                throw new Error(
+                    `Failed to store activity sync link: ${(error as Error).message}`,
+                );
             }
         },
 
-        async lookupActivityLink(token, now): Promise<HealthActivityLinkLookup> {
+        async lookupActivityLink(
+            token,
+            now,
+        ): Promise<HealthActivityLinkLookup> {
             const at = now ?? new Date();
             try {
                 const row = getDb()
@@ -373,9 +437,16 @@ export function createSqliteHealthActivityLinkStore(): HealthActivityLinkStore {
                         `SELECT ${ACTIVITY_LINK_COLUMNS} FROM health_activity_links
                          WHERE token_hash = ? AND expires_at > ? AND created_at > ?`,
                     )
-                    .get(hashSecret(token), at.toISOString(), liveSince(at)) as Row | null;
+                    .get(
+                        hashSecret(token),
+                        at.toISOString(),
+                        liveSince(at),
+                    ) as Row | null;
                 if (!row) return { status: "invalid" };
-                return { status: "valid", link: row as unknown as HealthActivityLinkRow };
+                return {
+                    status: "valid",
+                    link: row as unknown as HealthActivityLinkRow,
+                };
             } catch {
                 return { status: "unavailable" };
             }
@@ -383,27 +454,38 @@ export function createSqliteHealthActivityLinkStore(): HealthActivityLinkStore {
 
         async touchActivityLink(userId, lastUsedAt, expiresAt) {
             getDb()
-                .query("UPDATE health_activity_links SET last_used_at = ?, expires_at = ? WHERE user_id = ?")
+                .query(
+                    "UPDATE health_activity_links SET last_used_at = ?, expires_at = ? WHERE user_id = ?",
+                )
                 .run(ts(lastUsedAt), ts(expiresAt), userId);
         },
 
         async setActivitySynced(userId, at, fallbackTz) {
             if (fallbackTz !== null) {
                 getDb()
-                    .query("UPDATE health_activity_links SET last_sync_at = ?, fallback_tz = ? WHERE user_id = ?")
+                    .query(
+                        "UPDATE health_activity_links SET last_sync_at = ?, fallback_tz = ? WHERE user_id = ?",
+                    )
                     .run(ts(at), fallbackTz, userId);
             } else {
                 getDb()
-                    .query("UPDATE health_activity_links SET last_sync_at = ? WHERE user_id = ?")
+                    .query(
+                        "UPDATE health_activity_links SET last_sync_at = ? WHERE user_id = ?",
+                    )
                     .run(ts(at), userId);
             }
         },
 
         async deleteActivityLink(userId) {
-            getDb().query("DELETE FROM health_activity_links WHERE user_id = ?").run(userId);
+            getDb()
+                .query("DELETE FROM health_activity_links WHERE user_id = ?")
+                .run(userId);
         },
 
-        async getActivityLinkStatus(userId, now): Promise<HealthActivityLinkStatus | null> {
+        async getActivityLinkStatus(
+            userId,
+            now,
+        ): Promise<HealthActivityLinkStatus | null> {
             const at = now ?? new Date();
             const row = getDb()
                 .query(

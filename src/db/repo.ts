@@ -9,7 +9,12 @@
  * step-A1-report.md.
  */
 export { OWNER_ID } from "./owner.js";
-export { openDb, defaultDbPath, runMigrations, assertSingleOwner } from "./migrate.js";
+export {
+    openDb,
+    defaultDbPath,
+    runMigrations,
+    assertSingleOwner,
+} from "./migrate.js";
 export { getDb, setDb, closeDb } from "./conn.js";
 export { isUuid } from "./shared.js";
 export * from "./types.js";

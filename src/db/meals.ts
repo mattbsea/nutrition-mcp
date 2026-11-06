@@ -17,6 +17,7 @@ import {
     isUniqueViolation,
     likeAll,
     marks,
+    normId,
     toJson,
     ts,
     tx,
@@ -178,7 +179,7 @@ export async function insertMeal(
                     .query(
                         "SELECT 1 AS ok FROM saved_meals WHERE id = ? AND user_id = ?",
                     )
-                    .get(meal.saved_meal_id, userId);
+                    .get(normId(meal.saved_meal_id), userId);
                 if (!owned) {
                     throw new ToolError(
                         `No saved meal found with id ${meal.saved_meal_id}; it may have just been deleted.`,
@@ -186,6 +187,8 @@ export async function insertMeal(
                 }
             }
             const cols = mealColumns(meal, loggedAt, idempotencyKey);
+            if (meal.saved_meal_id)
+                cols.saved_meal_id = normId(meal.saved_meal_id);
             const names = ["user_id", ...Object.keys(cols)];
             const row = db
                 .query(
@@ -193,7 +196,14 @@ export async function insertMeal(
                 )
                 .get(userId, ...(Object.values(cols) as never[]));
             const inserted = mealOf(row);
-            insertItems(db, "meal_items", "meal_id", inserted.id, userId, meal.items ?? []);
+            insertItems(
+                db,
+                "meal_items",
+                "meal_id",
+                inserted.id,
+                userId,
+                meal.items ?? [],
+            );
             return { meal: inserted, deduplicated: false };
         });
     } catch (error) {
@@ -202,7 +212,9 @@ export async function insertMeal(
             // Cannot normally happen (the lookup above ran in the same write
             // transaction), but resolve it the way the race path always did.
             const raced = getDb()
-                .query("SELECT * FROM meals WHERE user_id = ? AND idempotency_key = ?")
+                .query(
+                    "SELECT * FROM meals WHERE user_id = ? AND idempotency_key = ?",
+                )
                 .get(userId, idempotencyKey);
             if (raced) return { meal: mealOf(raced), deduplicated: true };
         }
@@ -254,7 +266,11 @@ export function selectLoggedWindow(
     filter?: { kind: string },
 ): Row[] {
     const extra = filter ? " AND kind = ?" : "";
-    const params: unknown[] = [userId, startUtc.toISOString(), endUtc.toISOString()];
+    const params: unknown[] = [
+        userId,
+        startUtc.toISOString(),
+        endUtc.toISOString(),
+    ];
     if (filter) params.push(filter.kind);
     return getDb()
         .query(
@@ -270,14 +286,18 @@ export async function hasMealsBefore(
     tz: string = "UTC",
 ): Promise<boolean> {
     const row = getDb()
-        .query("SELECT 1 AS ok FROM meals WHERE user_id = ? AND logged_at < ? LIMIT 1")
+        .query(
+            "SELECT 1 AS ok FROM meals WHERE user_id = ? AND logged_at < ? LIMIT 1",
+        )
         .get(userId, zonedDayStartUtc(date, tz).toISOString());
     return row != null;
 }
 
 export async function countMeals(userId: string): Promise<number> {
     const row = getDb()
-        .query<{ n: number }, [string]>("SELECT count(*) AS n FROM meals WHERE user_id = ?")
+        .query<{ n: number }, [string]>(
+            "SELECT count(*) AS n FROM meals WHERE user_id = ?",
+        )
         .get(userId);
     return row?.n ?? 0;
 }
@@ -321,7 +341,9 @@ export async function existingMealIds(
 export async function getAllMeals(userId: string): Promise<Meal[]> {
     return (
         getDb()
-            .query("SELECT * FROM meals WHERE user_id = ? ORDER BY logged_at ASC, id ASC")
+            .query(
+                "SELECT * FROM meals WHERE user_id = ? ORDER BY logged_at ASC, id ASC",
+            )
             .all(userId) as Row[]
     )
         .map(mealOf)
@@ -335,7 +357,7 @@ export async function getMealById(
     if (!isUuid(id)) return null;
     const row = getDb()
         .query("SELECT * FROM meals WHERE id = ? AND user_id = ?")
-        .get(id, userId);
+        .get(normId(id), userId);
     return row ? mealOf(row) : null;
 }
 
@@ -363,7 +385,12 @@ export async function searchMeals(
                 `SELECT * FROM meals WHERE user_id = ?${since} AND ${cond} ORDER BY logged_at DESC LIMIT ?`,
             )
             .all(
-                ...([userId, ...(opts.sinceIso ? [ts(opts.sinceIso)] : []), ...condParams, limit] as never[]),
+                ...([
+                    userId,
+                    ...(opts.sinceIso ? [ts(opts.sinceIso)] : []),
+                    ...condParams,
+                    limit,
+                ] as never[]),
             ) as Row[];
 
     const results: Row[][] = [];
@@ -403,7 +430,7 @@ export async function searchMeals(
 export async function deleteMeal(userId: string, id: string): Promise<boolean> {
     const res = getDb()
         .query("DELETE FROM meals WHERE id = ? AND user_id = ?")
-        .run(id, userId);
+        .run(normId(id), userId);
     return res.changes > 0;
 }
 
@@ -442,7 +469,10 @@ export function guardMatches(row: Row, guard: MealSnapshotGuard): boolean {
         if (expected === null) {
             if (actual != null) return false;
         } else if (typeof expected === "object") {
-            if (actual == null || canonicalJson(actual) !== canonicalJson(expected))
+            if (
+                actual == null ||
+                canonicalJson(actual) !== canonicalJson(expected)
+            )
                 return false;
         } else if (actual == null || Number(actual) !== expected) {
             return false;
@@ -452,18 +482,14 @@ export function guardMatches(row: Row, guard: MealSnapshotGuard): boolean {
 }
 
 /** Builds the `column -> value` map of changed meal columns. */
-function mealUpdateColumns(fields: MealFieldUpdate, nullableCalories: boolean): Row {
+function mealUpdateColumns(fields: MealFieldUpdate): Row {
     const update: Row = {};
     if (fields.description !== undefined)
         update.description = decodeEscapeSequences(fields.description);
     if (fields.meal_type !== undefined) update.meal_type = fields.meal_type;
     if (fields.calories !== undefined)
         update.calories =
-            fields.calories == null
-                ? nullableCalories
-                    ? null
-                    : fields.calories
-                : toStoredInteger(fields.calories);
+            fields.calories == null ? null : toStoredInteger(fields.calories);
     for (const key of NUTRIENT_KEYS) {
         if (key === "calories" || fields[key] === undefined) continue;
         update[key] = fields[key];
@@ -514,17 +540,19 @@ export async function updateMeal(
     fields: Partial<MealInput>,
     guard?: MealSnapshotGuard,
 ): Promise<Meal> {
+    id = normId(id);
     try {
         return tx((db) => {
             const existingRow = db
                 .query("SELECT * FROM meals WHERE id = ? AND user_id = ?")
                 .get(id, userId);
-            if (!existingRow) throw new ToolError(`No meal found with id ${id}.`);
+            if (!existingRow)
+                throw new ToolError(`No meal found with id ${id}.`);
             const existing = mealOf(existingRow);
             if (guard && !guardMatches(existing as unknown as Row, guard))
                 throw new SnapshotConflictError(id);
 
-            const update = mealUpdateColumns(fields as MealFieldUpdate, false);
+            const update = mealUpdateColumns(fields as MealFieldUpdate);
             const newKey = updatedMealIdempotencyKey(userId, existing, fields);
             if (newKey !== null) update.idempotency_key = newKey;
             const row = applyMealUpdate(db, userId, id, update);
@@ -532,7 +560,10 @@ export async function updateMeal(
             return row;
         });
     } catch (error) {
-        if (error instanceof ToolError || error instanceof SnapshotConflictError)
+        if (
+            error instanceof ToolError ||
+            error instanceof SnapshotConflictError
+        )
             throw error;
         throw new Error(
             `Failed to update meal: ${error instanceof Error ? error.message : String(error)}`,
@@ -547,7 +578,9 @@ export function getMealItems(
     userId: string,
     mealIds: string[],
 ): Promise<Map<string, MealItemValues[]>> {
-    return Promise.resolve(itemsByParent("meal_items", "meal_id", userId, mealIds));
+    return Promise.resolve(
+        itemsByParent("meal_items", "meal_id", userId, mealIds),
+    );
 }
 
 export async function countMealItems(
@@ -558,7 +591,7 @@ export async function countMealItems(
         .query<{ n: number }, [string, string]>(
             "SELECT count(*) AS n FROM meal_items WHERE user_id = ? AND meal_id = ?",
         )
-        .get(userId, mealId);
+        .get(userId, normId(mealId));
     return row?.n ?? 0;
 }
 
@@ -574,15 +607,17 @@ export async function replaceMealItems(
     fields: MealFieldUpdate,
     items: MealItemValues[],
 ): Promise<Meal> {
+    id = normId(id);
     try {
         return tx((db) => {
             const existingRow = db
                 .query("SELECT * FROM meals WHERE id = ? AND user_id = ?")
                 .get(id, userId);
-            if (!existingRow) throw new ToolError(`No meal found with id ${id}.`);
+            if (!existingRow)
+                throw new ToolError(`No meal found with id ${id}.`);
             const existing = mealOf(existingRow);
 
-            const update = mealUpdateColumns(fields, true);
+            const update = mealUpdateColumns(fields);
             const newKey = updatedMealIdempotencyKey(
                 userId,
                 existing,
@@ -592,7 +627,9 @@ export async function replaceMealItems(
             const row = applyMealUpdate(db, userId, id, update);
             if (!row) throw new ToolError(`No meal found with id ${id}.`);
 
-            db.query("DELETE FROM meal_items WHERE meal_id = ? AND user_id = ?").run(id, userId);
+            db.query(
+                "DELETE FROM meal_items WHERE meal_id = ? AND user_id = ?",
+            ).run(id, userId);
             insertItems(db, "meal_items", "meal_id", id, userId, items);
             return row;
         });

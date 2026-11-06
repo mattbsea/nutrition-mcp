@@ -24,7 +24,11 @@ useMemoryDb();
 const count = (table: string, owner?: string) =>
     (
         getDb()
-            .query(owner ? `SELECT count(*) n FROM ${table} WHERE user_id = ?` : `SELECT count(*) n FROM ${table}`)
+            .query(
+                owner
+                    ? `SELECT count(*) n FROM ${table} WHERE user_id = ?`
+                    : `SELECT count(*) n FROM ${table}`,
+            )
             .get(...(owner ? [owner] : [])) as { n: number }
     ).n;
 
@@ -32,22 +36,92 @@ const count = (table: string, owner?: string) =>
 async function populate(who: string) {
     const saved = await createSavedMeal(
         who,
-        { name: `Saved ${who}`, description: "d", meal_type: null, calories: 1, protein_g: 1, carbs_g: 1, fat_g: 1 } as never,
+        {
+            name: `Saved ${who}`,
+            description: "d",
+            meal_type: null,
+            calories: 1,
+            protein_g: 1,
+            carbs_g: 1,
+            fat_g: 1,
+        } as never,
         [item(1)],
     );
-    await insertMeal(who, { description: "m", meal_type: "lunch", calories: 100, logged_at: "2026-03-14T10:00:00.000Z", saved_meal_id: saved.id, items: [item(1)] });
-    await insertWater(who, { amount_ml: 250, logged_at: "2026-03-14T10:00:00.000Z" });
-    await insertWeight(who, { weight_g: 80000, logged_at: "2026-03-14T10:00:00.000Z" });
-    await insertBodyMeasurement(who, { kind: "waist", value_mm: 800, value_entered: 80, entered_unit: "cm", logged_at: "2026-03-14T10:00:00.000Z" });
-    await insertActiveCalories(who, { kcal: 100, credit_pct: 100, logged_at: "2026-03-14T10:00:00.000Z" });
+    await insertMeal(who, {
+        description: "m",
+        meal_type: "lunch",
+        calories: 100,
+        logged_at: "2026-03-14T10:00:00.000Z",
+        saved_meal_id: saved.id,
+        items: [item(1)],
+    });
+    await insertWater(who, {
+        amount_ml: 250,
+        logged_at: "2026-03-14T10:00:00.000Z",
+    });
+    await insertWeight(who, {
+        weight_g: 80000,
+        logged_at: "2026-03-14T10:00:00.000Z",
+    });
+    await insertBodyMeasurement(who, {
+        kind: "waist",
+        value_mm: 800,
+        value_entered: 80,
+        entered_unit: "cm",
+        logged_at: "2026-03-14T10:00:00.000Z",
+    });
+    await insertActiveCalories(who, {
+        kcal: 100,
+        credit_pct: 100,
+        logged_at: "2026-03-14T10:00:00.000Z",
+    });
     await upsertProfile(who, { timezone: "UTC" });
     await upsertNutritionGoals(who, { daily_calories: 2000 });
     const hs = createSqliteHealthSyncStore();
-    await hs.replaceLink(who, { fields: ["calories"], fallbackTz: null, syncStartDate: "2026-03-10", expiresAt: "2030-01-01T00:00:00.000Z" }, `tok-${who}`);
-    await hs.insertDays([{ user_id: who, date: "2026-03-13", timezone: "UTC", sent_values: null, topup_seq: 0, offer_count: 0, notified: {}, first_sent_at: null, last_sent_at: null }]);
-    await hs.createPending({ kind: "health", connectId: `c-${who}`, deviceSecret: `d-${who}`, pkceVerifier: "v", fields: [], tz: null, backfillDays: 0, expiresAt: "2030-01-01T00:00:00.000Z" });
-    await hs.setPendingClaim(`c-${who}`, `claim-${who}`, who, "2030-01-01T00:00:00.000Z");
-    await createSqliteHealthActivityLinkStore().replaceActivityLink(who, { fallbackTz: null, expiresAt: "2030-01-01T00:00:00.000Z" }, `act-${who}`);
+    await hs.replaceLink(
+        who,
+        {
+            fields: ["calories"],
+            fallbackTz: null,
+            syncStartDate: "2026-03-10",
+            expiresAt: "2030-01-01T00:00:00.000Z",
+        },
+        `tok-${who}`,
+    );
+    await hs.insertDays([
+        {
+            user_id: who,
+            date: "2026-03-13",
+            timezone: "UTC",
+            sent_values: null,
+            topup_seq: 0,
+            offer_count: 0,
+            notified: {},
+            first_sent_at: null,
+            last_sent_at: null,
+        },
+    ]);
+    await hs.createPending({
+        kind: "health",
+        connectId: `c-${who}`,
+        deviceSecret: `d-${who}`,
+        pkceVerifier: "v",
+        fields: [],
+        tz: null,
+        backfillDays: 0,
+        expiresAt: "2030-01-01T00:00:00.000Z",
+    });
+    await hs.setPendingClaim(
+        `c-${who}`,
+        `claim-${who}`,
+        who,
+        "2030-01-01T00:00:00.000Z",
+    );
+    await createSqliteHealthActivityLinkStore().replaceActivityLink(
+        who,
+        { fallbackTz: null, expiresAt: "2030-01-01T00:00:00.000Z" },
+        `act-${who}`,
+    );
 }
 
 describe("deleteAllUserData", () => {
@@ -67,7 +141,9 @@ describe("deleteAllUserData", () => {
 
     test("covers every table that has an owner column (a new table cannot be forgotten)", () => {
         for (const t of TABLES.filter((x) => x !== "food_cache")) {
-            const cols = getDb().query(`PRAGMA table_info(${t})`).all() as { name: string }[];
+            const cols = getDb().query(`PRAGMA table_info(${t})`).all() as {
+                name: string;
+            }[];
             expect(cols.map((c) => c.name)).toContain("user_id");
         }
     });
@@ -76,7 +152,9 @@ describe("deleteAllUserData", () => {
         await populate(USER);
         const before = TABLES.map((t) => [t, count(t)] as const);
         getDb().exec("ALTER TABLE profiles RENAME TO profiles_gone"); // fails mid-sequence
-        await expect(deleteAllUserData(USER)).rejects.toThrow(/Failed to delete user data/);
+        await expect(deleteAllUserData(USER)).rejects.toThrow(
+            /Failed to delete user data/,
+        );
         getDb().exec("ALTER TABLE profiles_gone RENAME TO profiles");
         expect(TABLES.map((t) => [t, count(t)] as const)).toEqual(before);
     });
@@ -95,7 +173,13 @@ describe("foreign keys", () => {
         expect(count("saved_meal_items")).toBe(1);
         getDb().query("DELETE FROM saved_meals").run();
         expect(count("saved_meal_items")).toBe(0);
-        expect((getDb().query("SELECT saved_meal_id FROM meals").get() as { saved_meal_id: string | null }).saved_meal_id).toBeNull();
+        expect(
+            (
+                getDb().query("SELECT saved_meal_id FROM meals").get() as {
+                    saved_meal_id: string | null;
+                }
+            ).saved_meal_id,
+        ).toBeNull();
         getDb().query("DELETE FROM meals").run();
         expect(count("meal_items")).toBe(0);
     });
@@ -103,7 +187,9 @@ describe("foreign keys", () => {
     test("an item cannot point at a missing meal", () => {
         expect(() =>
             getDb()
-                .query("INSERT INTO meal_items (meal_id, user_id, position, name, calories, protein_g, carbs_g, fat_g) VALUES ('nope', ?, 1, 'x', 1, 1, 1, 1)")
+                .query(
+                    "INSERT INTO meal_items (meal_id, user_id, position, name, calories, protein_g, carbs_g, fat_g) VALUES ('nope', ?, 1, 'x', 1, 1, 1, 1)",
+                )
                 .run(USER),
         ).toThrow(/FOREIGN KEY/);
     });
@@ -111,7 +197,10 @@ describe("foreign keys", () => {
 
 describe("export file names", () => {
     test("exportStoragePaths always includes the current archive and the legacy csv", () => {
-        expect(exportStoragePaths(USER)).toEqual([exportArchivePath(USER), `${USER}/meals.csv`]);
+        expect(exportStoragePaths(USER)).toEqual([
+            exportArchivePath(USER),
+            `${USER}/meals.csv`,
+        ]);
     });
 });
 
@@ -119,7 +208,8 @@ describe("owner predicate is injection-safe", () => {
     test("a hostile userId matches nothing and damages nothing", async () => {
         await populate(USER);
         const evil = "x' OR '1'='1";
-        const { getAllMeals, getAllWater, countMeals, deleteMeal } = await import("./repo.js");
+        const { getAllMeals, getAllWater, countMeals, deleteMeal } =
+            await import("./repo.js");
         expect(await getAllMeals(evil)).toEqual([]);
         expect(await getAllWater(evil)).toEqual([]);
         expect(await countMeals(evil)).toBe(0);

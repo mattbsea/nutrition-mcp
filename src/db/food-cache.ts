@@ -30,7 +30,9 @@ export async function readFoodCache(
             .get(source, sourceId);
         if (!row) return null;
         const payload = fromJson(row.payload);
-        return payload === null ? null : { payload, fetched_at: row.fetched_at };
+        return payload === null
+            ? null
+            : { payload, fetched_at: row.fetched_at };
     } catch {
         return null;
     }
@@ -56,7 +58,10 @@ export async function writeFoodCache(
 }
 
 /** Deletes entries fetched more than `maxAgeMs` ago; returns how many. */
-export function pruneFoodCache(maxAgeMs: number, now: Date = new Date()): number {
+export function pruneFoodCache(
+    maxAgeMs: number,
+    now: Date = new Date(),
+): number {
     return getDb()
         .query("DELETE FROM food_cache WHERE fetched_at < ?")
         .run(new Date(now.getTime() - maxAgeMs).toISOString()).changes;
@@ -76,7 +81,9 @@ export async function getCachedFoodRecord(
         if (!hit) return null;
         if (source === "openfoodfacts") {
             const cached = fromCachedPayload(hit.payload as FoodResult);
-            return cached ? referenceFromFood(cached.food, id, hit.fetched_at) : null;
+            return cached
+                ? referenceFromFood(cached.food, id, hit.fetched_at)
+                : null;
         }
         const record = usdaRecordFromPayload(hit.payload);
         if (!record || String(record.fdc_id) !== id) return null;
@@ -108,5 +115,10 @@ export async function writeUsdaFoodCache(
     record: UsdaRecord,
     fetchedAt: number,
 ): Promise<void> {
-    await writeFoodCache(USDA_CACHE_SOURCE, usdaSourceId(record.fdc_id), record, fetchedAt);
+    await writeFoodCache(
+        USDA_CACHE_SOURCE,
+        usdaSourceId(record.fdc_id),
+        record,
+        fetchedAt,
+    );
 }

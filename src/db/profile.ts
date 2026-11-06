@@ -1,5 +1,11 @@
 /** The single profile row and the nutrition goals (+ effective-dated history). */
-import { isWeightUnit, isLengthUnit, toStoredInteger, type WeightUnit, type LengthUnit } from "../units.js";
+import {
+    isWeightUnit,
+    isLengthUnit,
+    toStoredInteger,
+    type WeightUnit,
+    type LengthUnit,
+} from "../units.js";
 import { isDrinkUnit, type DrinkUnit } from "../alcohol.js";
 import { activityCreditPct } from "../activity.js";
 import { ToolError, newErrorRef } from "../errors.js";
@@ -296,7 +302,9 @@ function recordGoalsHistory(
                     db.query(HISTORY_INSERT).run(
                         userId,
                         prior.updated_at,
-                        ...(GOAL_COLUMNS.map((c) => priorGoals[c] ?? null) as never[]),
+                        ...(GOAL_COLUMNS.map(
+                            (c) => priorGoals[c] ?? null,
+                        ) as never[]),
                     );
                     tail = priorGoals;
                 }

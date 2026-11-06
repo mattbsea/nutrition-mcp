@@ -24,9 +24,16 @@
 const UUID = `(lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' || substr(hex(randomblob(2)), 2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || substr(hex(randomblob(2)), 2) || '-' || hex(randomblob(6))))`;
 const NOW = `(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`;
 
-/** `col IS NULL OR col = CAST(col AS INTEGER)`: the integer-column check. */
-const isInt = (col: string) =>
-    `CHECK (${col} IS NULL OR ${col} = CAST(${col} AS INTEGER))`;
+// Every table is STRICT: SQLite then enforces the declared column type like
+// Postgres did (a non-integral REAL into an INTEGER column, or text into a
+// REAL/INTEGER column, is an error), which replaces the per-column "is
+// integral" CHECKs of the first draft. STRICT needs SQLite >= 3.37.
+/** An ISO-8601 UTC instant as every writer stores it (see util.ts ts()). */
+const isoTs = (col: string) =>
+    `CHECK (${col} IS NULL OR ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]*Z')`;
+/** A calendar date, YYYY-MM-DD. */
+const isoDate = (col: string) =>
+    `CHECK (${col} IS NULL OR ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')`;
 const jsonObj = (col: string) =>
     `CHECK (${col} IS NULL OR json_type(${col}) = 'object')`;
 
@@ -71,17 +78,16 @@ CREATE TABLE saved_meals (
     ${nutrientColumns({ calories: "calories INTEGER CHECK (calories >= 0)", required: false, macroCheck: true })},
     nutrient_sources TEXT ${jsonObj("nutrient_sources")},
     source_detail TEXT ${jsonObj("source_detail")},
-    created_at TEXT NOT NULL DEFAULT ${NOW},
-    updated_at TEXT NOT NULL DEFAULT ${NOW},
-    ${isInt("calories")}
-);
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
+    updated_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("updated_at")}
+) STRICT;
 CREATE UNIQUE INDEX uniq_saved_meals_user_name ON saved_meals (user_id, name_key);
 CREATE INDEX idx_saved_meals_user ON saved_meals (user_id);
 
 CREATE TABLE meals (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
     user_id TEXT NOT NULL,
-    logged_at TEXT NOT NULL DEFAULT ${NOW},
+    logged_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("logged_at")},
     meal_type TEXT CHECK (meal_type IN ('breakfast', 'lunch', 'dinner', 'snack')),
     description TEXT NOT NULL,
     ${nutrientColumns({ calories: "calories INTEGER", required: false, macroCheck: false })},
@@ -89,9 +95,8 @@ CREATE TABLE meals (
     idempotency_key TEXT,
     saved_meal_id TEXT REFERENCES saved_meals (id) ON DELETE SET NULL,
     nutrient_sources TEXT ${jsonObj("nutrient_sources")},
-    source_detail TEXT ${jsonObj("source_detail")},
-    ${isInt("calories")}
-);
+    source_detail TEXT ${jsonObj("source_detail")}
+) STRICT;
 CREATE UNIQUE INDEX uniq_meals_user_idem ON meals (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE INDEX idx_meals_user_logged_at ON meals (user_id, logged_at);
 CREATE INDEX idx_meals_saved_meal_id ON meals (saved_meal_id) WHERE saved_meal_id IS NOT NULL;
@@ -108,7 +113,7 @@ CREATE TABLE meal_items (
     nutrient_sources TEXT ${jsonObj("nutrient_sources")},
     source_detail TEXT ${jsonObj("source_detail")},
     UNIQUE (meal_id, position)
-);
+) STRICT;
 CREATE INDEX idx_meal_items_user ON meal_items (user_id);
 
 CREATE TABLE saved_meal_items (
@@ -123,14 +128,14 @@ CREATE TABLE saved_meal_items (
     nutrient_sources TEXT ${jsonObj("nutrient_sources")},
     source_detail TEXT ${jsonObj("source_detail")},
     UNIQUE (saved_meal_id, position)
-);
+) STRICT;
 CREATE INDEX idx_saved_meal_items_user ON saved_meal_items (user_id);
 
 -- numeric(6,2) / numeric(7,2) goal columns: the repo rounds to 2 decimals on
 -- write, as Postgres does.
 CREATE TABLE nutrition_goals (
     user_id TEXT PRIMARY KEY,
-    daily_calories INTEGER ${isInt("daily_calories")},
+    daily_calories INTEGER,
     daily_protein_g REAL,
     daily_carbs_g REAL,
     daily_fat_g REAL,
@@ -141,16 +146,16 @@ CREATE TABLE nutrition_goals (
     daily_alcohol_g REAL CHECK (daily_alcohol_g >= 0),
     daily_caffeine_mg REAL CHECK (daily_caffeine_mg >= 0),
     daily_sodium_mg REAL CHECK (daily_sodium_mg >= 0),
-    daily_water_ml INTEGER ${isInt("daily_water_ml")},
+    daily_water_ml INTEGER,
     target_weight_g INTEGER CHECK (target_weight_g > 0) ,
-    updated_at TEXT NOT NULL DEFAULT ${NOW}
-);
+    updated_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("updated_at")}
+) STRICT;
 
 CREATE TABLE nutrition_goals_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id TEXT NOT NULL,
-    effective_at TEXT NOT NULL DEFAULT ${NOW},
-    daily_calories INTEGER ${isInt("daily_calories")},
+    effective_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("effective_at")},
+    daily_calories INTEGER,
     daily_protein_g REAL,
     daily_carbs_g REAL,
     daily_fat_g REAL,
@@ -161,32 +166,32 @@ CREATE TABLE nutrition_goals_history (
     daily_alcohol_g REAL CHECK (daily_alcohol_g >= 0),
     daily_caffeine_mg REAL CHECK (daily_caffeine_mg >= 0),
     daily_sodium_mg REAL CHECK (daily_sodium_mg >= 0),
-    daily_water_ml INTEGER ${isInt("daily_water_ml")},
+    daily_water_ml INTEGER,
     target_weight_g INTEGER CHECK (target_weight_g > 0)
-);
+) STRICT;
 CREATE INDEX idx_nutrition_goals_history_user_effective_at ON nutrition_goals_history (user_id, effective_at);
 
 CREATE TABLE water_log (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
     user_id TEXT NOT NULL,
-    amount_ml INTEGER NOT NULL CHECK (amount_ml > 0) ${isInt("amount_ml")},
-    logged_at TEXT NOT NULL DEFAULT ${NOW},
+    amount_ml INTEGER NOT NULL CHECK (amount_ml > 0),
+    logged_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("logged_at")},
     notes TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
     idempotency_key TEXT
-);
+) STRICT;
 CREATE INDEX idx_water_log_user_logged_at ON water_log (user_id, logged_at);
 CREATE UNIQUE INDEX uniq_water_log_user_idem ON water_log (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE weight_log (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
     user_id TEXT NOT NULL,
-    weight_g INTEGER NOT NULL CHECK (weight_g > 0) ${isInt("weight_g")},
-    logged_at TEXT NOT NULL DEFAULT ${NOW},
+    weight_g INTEGER NOT NULL CHECK (weight_g > 0),
+    logged_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("logged_at")},
     notes TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
     idempotency_key TEXT
-);
+) STRICT;
 CREATE INDEX idx_weight_log_user_logged_at ON weight_log (user_id, logged_at);
 CREATE UNIQUE INDEX uniq_weight_log_user_idem ON weight_log (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
@@ -194,30 +199,30 @@ CREATE TABLE body_measurement_log (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
     user_id TEXT NOT NULL,
     kind TEXT NOT NULL CHECK (kind IN ('waist', 'hips', 'neck', 'chest', 'shoulders', 'upper_arm', 'forearm', 'thigh', 'calf')),
-    value_mm INTEGER NOT NULL CHECK (value_mm > 0) ${isInt("value_mm")},
+    value_mm INTEGER NOT NULL CHECK (value_mm > 0),
     value_entered REAL NOT NULL CHECK (value_entered > 0),
     entered_unit TEXT NOT NULL CHECK (entered_unit IN ('cm', 'in')),
-    logged_at TEXT NOT NULL DEFAULT ${NOW},
+    logged_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("logged_at")},
     notes TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
     idempotency_key TEXT
-);
+) STRICT;
 CREATE INDEX idx_body_measurement_log_user_logged_at ON body_measurement_log (user_id, logged_at);
 CREATE UNIQUE INDEX uniq_body_measurement_log_user_idem ON body_measurement_log (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE active_calories_log (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
     user_id TEXT NOT NULL,
-    logged_at TEXT NOT NULL DEFAULT ${NOW},
-    kcal INTEGER NOT NULL CHECK (kcal BETWEEN 1 AND 10000) ${isInt("kcal")},
-    credit_pct INTEGER NOT NULL CHECK (credit_pct BETWEEN 0 AND 100) ${isInt("credit_pct")},
+    logged_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("logged_at")},
+    kcal INTEGER NOT NULL CHECK (kcal BETWEEN 1 AND 10000),
+    credit_pct INTEGER NOT NULL CHECK (credit_pct BETWEEN 0 AND 100),
     notes TEXT,
     idempotency_key TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
     source TEXT CHECK (source IN ('apple_health')),
-    source_date TEXT,
+    source_date TEXT ${isoDate("source_date")},
     CONSTRAINT active_calories_log_source_date_check CHECK ((source IS NULL) = (source_date IS NULL))
-);
+) STRICT;
 CREATE INDEX idx_active_calories_log_user_logged_at ON active_calories_log (user_id, logged_at);
 CREATE UNIQUE INDEX uniq_active_calories_log_user_idem ON active_calories_log (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
 CREATE UNIQUE INDEX uniq_active_calories_log_health_day ON active_calories_log (user_id, source_date) WHERE source = 'apple_health';
@@ -232,19 +237,19 @@ CREATE TABLE profiles (
     widgets_enabled INTEGER NOT NULL DEFAULT 1 CHECK (widgets_enabled IN (0, 1)),
     alcohol_tracking_enabled INTEGER NOT NULL DEFAULT 0 CHECK (alcohol_tracking_enabled IN (0, 1)),
     preferred_drink_unit TEXT CHECK (preferred_drink_unit IS NULL OR preferred_drink_unit IN ('us', 'uk')),
-    activity_credit_pct INTEGER CHECK (activity_credit_pct BETWEEN 0 AND 100) ${isInt("activity_credit_pct")},
+    activity_credit_pct INTEGER CHECK (activity_credit_pct BETWEEN 0 AND 100),
     locale TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
-    updated_at TEXT NOT NULL DEFAULT ${NOW}
-);
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
+    updated_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("updated_at")}
+) STRICT;
 
 CREATE TABLE food_cache (
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
     payload TEXT NOT NULL CHECK (json_valid(payload)),
-    fetched_at TEXT NOT NULL DEFAULT ${NOW},
+    fetched_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("fetched_at")},
     PRIMARY KEY (source, source_id)
-);
+) STRICT;
 
 CREATE TABLE health_sync_pending (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
@@ -257,10 +262,10 @@ CREATE TABLE health_sync_pending (
     backfill_days INTEGER NOT NULL DEFAULT 0 CHECK (backfill_days BETWEEN 0 AND 7),
     user_id TEXT,
     claim_code_hash TEXT UNIQUE,
-    claim_expires_at TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
-    expires_at TEXT NOT NULL
-);
+    claim_expires_at TEXT ${isoTs("claim_expires_at")},
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
+    expires_at TEXT NOT NULL ${isoTs("expires_at")}
+) STRICT;
 
 CREATE TABLE health_sync_links (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
@@ -269,37 +274,37 @@ CREATE TABLE health_sync_links (
     kind TEXT NOT NULL DEFAULT 'shortcut' CHECK (kind IN ('shortcut')),
     fields TEXT NOT NULL CHECK (json_type(fields) = 'array'),
     fallback_tz TEXT,
-    sync_start_date TEXT NOT NULL,
-    lease_until TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
-    last_used_at TEXT,
-    last_sync_at TEXT,
-    expires_at TEXT NOT NULL
-);
+    sync_start_date TEXT NOT NULL ${isoDate("sync_start_date")},
+    lease_until TEXT ${isoTs("lease_until")},
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
+    last_used_at TEXT ${isoTs("last_used_at")},
+    last_sync_at TEXT ${isoTs("last_sync_at")},
+    expires_at TEXT NOT NULL ${isoTs("expires_at")}
+) STRICT;
 
 CREATE TABLE health_sync_days (
     user_id TEXT NOT NULL,
-    date TEXT NOT NULL,
+    date TEXT NOT NULL ${isoDate("date")},
     timezone TEXT NOT NULL,
     sent_values TEXT CHECK (sent_values IS NULL OR json_valid(sent_values)),
     topup_seq INTEGER NOT NULL DEFAULT 0,
     offer_count INTEGER NOT NULL DEFAULT 0,
     notified TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(notified)),
-    first_sent_at TEXT,
-    last_sent_at TEXT,
+    first_sent_at TEXT ${isoTs("first_sent_at")},
+    last_sent_at TEXT ${isoTs("last_sent_at")},
     PRIMARY KEY (user_id, date)
-);
+) STRICT;
 
 CREATE TABLE health_activity_links (
     id TEXT PRIMARY KEY DEFAULT ${UUID},
     user_id TEXT NOT NULL UNIQUE,
     token_hash TEXT NOT NULL UNIQUE,
     fallback_tz TEXT,
-    created_at TEXT NOT NULL DEFAULT ${NOW},
-    last_used_at TEXT,
-    last_sync_at TEXT,
-    expires_at TEXT NOT NULL
-);
+    created_at TEXT NOT NULL DEFAULT ${NOW} ${isoTs("created_at")},
+    last_used_at TEXT ${isoTs("last_used_at")},
+    last_sync_at TEXT ${isoTs("last_sync_at")},
+    expires_at TEXT NOT NULL ${isoTs("expires_at")}
+) STRICT;
 `;
 
 export interface Migration {

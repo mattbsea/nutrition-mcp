@@ -1,4 +1,6 @@
-FROM oven/bun:1 AS base
+FROM oven/bun:1.4.4 AS base
+# TZ-independent: the app never relies on the process time zone.
+ENV TZ=UTC
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile

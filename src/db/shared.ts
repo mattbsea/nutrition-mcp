@@ -1,6 +1,10 @@
 /** Helpers shared by the meal, saved-meal and log repos. */
 import type { Database } from "bun:sqlite";
-import type { MealItemValues, MealNutrientKey, NutrientValues } from "../meal-items.js";
+import type {
+    MealItemValues,
+    MealNutrientKey,
+    NutrientValues,
+} from "../meal-items.js";
 import {
     parseNutrientSources,
     parseSourceDetail,
@@ -8,7 +12,15 @@ import {
     type SourceDetail,
 } from "../provenance.js";
 import { getDb } from "./conn.js";
-import { chunks, fromJson, marks, numOrNull, toJson, type Row } from "./util.js";
+import {
+    chunks,
+    fromJson,
+    marks,
+    normId,
+    numOrNull,
+    toJson,
+    type Row,
+} from "./util.js";
 
 /** Nutrient columns, in MEAL_NUTRIENT_KEYS order. */
 export const NUTRIENT_KEYS: readonly MealNutrientKey[] = [
@@ -135,7 +147,7 @@ export function itemsByParent(
     parentIds: readonly string[],
 ): Map<string, MealItemValues[]> {
     const byParent = new Map<string, MealItemValues[]>();
-    const ids = [...new Set(parentIds)].filter(isUuid);
+    const ids = [...new Set(parentIds.filter(isUuid).map(normId))];
     for (const chunk of chunks(ids, 500)) {
         const rows = getDb()
             .query(

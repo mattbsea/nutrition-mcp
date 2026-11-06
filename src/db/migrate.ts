@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MIGRATIONS, SCHEMA_VERSION, TABLES } from "./schema";
+import { MIGRATIONS, TABLES, type Migration } from "./schema";
 import { OWNER_ID } from "./owner";
 
 /** DATA_DIR/nutrition.db. DATA_DIR defaults to ./data (the add-on sets /data). */
@@ -21,18 +21,30 @@ function userVersion(db: Database): number {
  * IMMEDIATE transaction (DDL is transactional in SQLite), then returns the
  * resulting version. Re-running is a no-op. A database from a NEWER build
  * (user_version above what this code knows) is refused rather than guessed at.
+ *
+ * user_version is (re-)read AFTER the write lock is taken: two processes that
+ * open an empty file together both see 0 first, but the one that waits for the
+ * lock finds the other's work done and skips it instead of failing on
+ * "table already exists".
  */
-export function runMigrations(db: Database): number {
-    const current = userVersion(db);
-    if (current > SCHEMA_VERSION) {
+export function runMigrations(
+    db: Database,
+    migrations: readonly Migration[] = MIGRATIONS,
+): number {
+    const latest = migrations[migrations.length - 1]?.version ?? 0;
+    if (userVersion(db) > latest) {
         throw new Error(
-            `Database schema version ${current} is newer than this build supports (${SCHEMA_VERSION}); refusing to open it.`,
+            `Database schema version ${userVersion(db)} is newer than this build supports (${latest}); refusing to open it.`,
         );
     }
-    for (const m of MIGRATIONS) {
-        if (m.version <= current) continue;
+    for (const m of migrations) {
+        if (m.version <= userVersion(db)) continue;
         db.exec("BEGIN IMMEDIATE");
         try {
+            if (m.version <= userVersion(db)) {
+                db.exec("COMMIT"); // another process migrated while we waited
+                continue;
+            }
             db.exec(m.sql);
             // PRAGMA does not take bound parameters; version is a code constant.
             db.exec(`PRAGMA user_version = ${Number(m.version)}`);
@@ -60,6 +72,40 @@ function registerFunctions(db: Database): void {
 }
 
 /**
+ * Fails fast, with a clear message, when the runtime lacks what this layer
+ * needs (bun:sqlite's Database#function and Transaction#immediate, STRICT
+ * tables via SQLite >= 3.37). The Dockerfile pins the Bun version this was
+ * built and tested with; this catches a stray older runtime.
+ */
+export function assertRuntimeSupport(db: Database): void {
+    const proto = Object.getPrototypeOf(db) as Record<string, unknown>;
+    if (
+        typeof proto.function !== "function" ||
+        typeof proto.transaction !== "function"
+    ) {
+        throw new Error(
+            "This build needs a Bun with bun:sqlite Database#function and #transaction (Bun >= 1.4); upgrade the runtime.",
+        );
+    }
+    const v =
+        db.query<{ v: string }, []>("SELECT sqlite_version() AS v").get()?.v ??
+        "0";
+    const [maj = 0, min = 0] = v.split(".").map(Number);
+    if (maj < 3 || (maj === 3 && min < 37)) {
+        throw new Error(`SQLite ${v} is too old: STRICT tables need >= 3.37.`);
+    }
+    const probe = db.transaction(() => 1);
+    if (
+        typeof (probe as unknown as { immediate?: unknown }).immediate !==
+        "function"
+    ) {
+        throw new Error(
+            "This Bun lacks Transaction#immediate; upgrade the runtime.",
+        );
+    }
+}
+
+/**
  * Opens (creating if needed) the database and brings it to the current schema.
  * `path` may be ":memory:" for tests. foreign_keys is a per-connection pragma
  * and must be set on every open.
@@ -68,7 +114,14 @@ export function openDb(path: string = defaultDbPath()): Database {
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     const db = new Database(path, { create: true, strict: true });
     try {
+        assertRuntimeSupport(db);
         db.exec("PRAGMA foreign_keys = ON");
+        // The database is SINGLE-PROCESS: one server process opens it once and
+        // keeps the connection (getDb). bun:sqlite is synchronous, so this
+        // timeout blocks the event loop while another process holds the write
+        // lock; it exists to ride out a short external reader/backup, not to
+        // support concurrent writers. External tools should open the file
+        // read-only.
         db.exec("PRAGMA busy_timeout = 5000");
         if (path !== ":memory:") {
             db.exec("PRAGMA journal_mode = WAL");

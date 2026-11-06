@@ -71,7 +71,8 @@ describe("schema", () => {
             "uniq_water_log_user_idem",
             "uniq_weight_log_user_idem",
         ]);
-        for (const i of idx) expect(i.sql).toContain("WHERE idempotency_key IS NOT NULL");
+        for (const i of idx)
+            expect(i.sql).toContain("WHERE idempotency_key IS NOT NULL");
         db.close();
     });
 
@@ -79,10 +80,14 @@ describe("schema", () => {
         const db = openDb(":memory:");
         expect(() =>
             db
-                .query("INSERT INTO meals (user_id, description, calories) VALUES (?, 'x', 10.5)")
+                .query(
+                    "INSERT INTO meals (user_id, description, calories) VALUES (?, 'x', 10.5)",
+                )
                 .run(OWNER_ID),
         ).toThrow();
-        db.query("INSERT INTO meals (user_id, description, calories) VALUES (?, 'x', 10)").run(OWNER_ID);
+        db.query(
+            "INSERT INTO meals (user_id, description, calories) VALUES (?, 'x', 10)",
+        ).run(OWNER_ID);
         db.close();
     });
 });
@@ -90,10 +95,16 @@ describe("schema", () => {
 describe("migrations", () => {
     test("running them again on a migrated database changes nothing", () => {
         const db = openDb(":memory:");
-        db.query("INSERT INTO water_log (user_id, amount_ml) VALUES (?, 250)").run(OWNER_ID);
+        db.query(
+            "INSERT INTO water_log (user_id, amount_ml) VALUES (?, 250)",
+        ).run(OWNER_ID);
         expect(runMigrations(db)).toBe(SCHEMA_VERSION);
         expect(runMigrations(db)).toBe(SCHEMA_VERSION);
-        expect(db.query<{ n: number }, []>("SELECT count(*) n FROM water_log").get()!.n).toBe(1);
+        expect(
+            db
+                .query<{ n: number }, []>("SELECT count(*) n FROM water_log")
+                .get()!.n,
+        ).toBe(1);
         db.close();
     });
 
@@ -102,11 +113,22 @@ describe("migrations", () => {
         dirs.push(dir);
         const path = join(dir, "sub", "nutrition.db");
         const a = openDb(path);
-        a.query("INSERT INTO water_log (user_id, amount_ml) VALUES (?, 500)").run(OWNER_ID);
-        expect(a.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()!.journal_mode).toBe("wal");
+        a.query(
+            "INSERT INTO water_log (user_id, amount_ml) VALUES (?, 500)",
+        ).run(OWNER_ID);
+        expect(
+            a.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()!
+                .journal_mode,
+        ).toBe("wal");
         a.close();
         const b = openDb(path);
-        expect(b.query<{ amount_ml: number }, []>("SELECT amount_ml FROM water_log").get()!.amount_ml).toBe(500);
+        expect(
+            b
+                .query<{ amount_ml: number }, []>(
+                    "SELECT amount_ml FROM water_log",
+                )
+                .get()!.amount_ml,
+        ).toBe(500);
         b.close();
     });
 
@@ -134,17 +156,36 @@ describe("migrations", () => {
 
     test("a failing migration rolls back completely and keeps the version", () => {
         const db = new Database(":memory:");
-        const bad = { version: 1, name: "bad", sql: "CREATE TABLE ok (a); CREATE TABLE ok (b);" };
-        const real = MIGRATIONS.slice();
-        (MIGRATIONS as unknown as unknown[]).splice(0, MIGRATIONS.length, bad);
-        try {
-            expect(() => runMigrations(db)).toThrow();
-        } finally {
-            (MIGRATIONS as unknown as unknown[]).splice(0, MIGRATIONS.length, ...real);
-        }
+        const bad = {
+            version: 1,
+            name: "bad",
+            sql: "CREATE TABLE ok (a); CREATE TABLE ok (b);",
+        };
+        expect(() => runMigrations(db, [bad])).toThrow(/already exists/);
         expect(tableNames(db)).toEqual([]);
-        expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(0);
+        expect(
+            db.query<{ user_version: number }, []>("PRAGMA user_version").get()!
+                .user_version,
+        ).toBe(0);
         db.close();
+    });
+
+    test("a migration another process already applied while we waited for the lock is skipped", () => {
+        const dir = mkdtempSync(join(tmpdir(), "nutdb-"));
+        dirs.push(dir);
+        const path = join(dir, "n.db");
+        const a = new Database(path, { create: true });
+        const b = new Database(path);
+        // b read user_version = 0 first (the stale read the old runner acted on)...
+        expect(
+            b.query<{ user_version: number }, []>("PRAGMA user_version").get()!
+                .user_version,
+        ).toBe(0);
+        // ...then a migrates; b must notice under its own lock, not re-run V1.
+        runMigrations(a);
+        expect(runMigrations(b)).toBe(SCHEMA_VERSION);
+        a.close();
+        b.close();
     });
 
     test("MIGRATIONS versions are strictly increasing from 1", () => {
@@ -155,10 +196,16 @@ describe("migrations", () => {
 describe("owner audit", () => {
     test("passes with only the local owner and fails on a stray owner id", () => {
         const db = openDb(":memory:");
-        db.query("INSERT INTO water_log (user_id, amount_ml) VALUES (?, 250)").run(OWNER_ID);
+        db.query(
+            "INSERT INTO water_log (user_id, amount_ml) VALUES (?, 250)",
+        ).run(OWNER_ID);
         expect(() => assertSingleOwner(db)).not.toThrow();
-        db.query("INSERT INTO water_log (user_id, amount_ml) VALUES ('someone-else', 250)").run();
-        expect(() => assertSingleOwner(db)).toThrow(/other than the single local owner/);
+        db.query(
+            "INSERT INTO water_log (user_id, amount_ml) VALUES ('someone-else', 250)",
+        ).run();
+        expect(() => assertSingleOwner(db)).toThrow(
+            /other than the single local owner/,
+        );
         db.close();
     });
 });

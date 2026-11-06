@@ -329,7 +329,9 @@ export type MealFieldUpdate = Partial<Omit<MealInput, MealNutrientKey>> &
  *  meal or saved meal, and its two label columns. A write conditional on this
  *  snapshot only lands while the row still holds exactly these values.
  *  `null` means IS NULL; an object label compares as JSON. */
-export type MealSnapshotGuard = Partial<Record<MealNutrientKey, number | null>> & {
+export type MealSnapshotGuard = Partial<
+    Record<MealNutrientKey, number | null>
+> & {
     nutrient_sources?: unknown;
     source_detail?: unknown;
 };
