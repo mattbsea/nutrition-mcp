@@ -27,6 +27,7 @@ import {
     noteAuthFailure,
     noteGlobalFailure,
 } from "./rate-limit.js";
+import { trustProxy } from "./net.js";
 import { isHttpsRequest } from "./url.js";
 import { maskIp } from "./net.js";
 
@@ -47,14 +48,6 @@ declare module "hono" {
 }
 
 // ---------- client identity ----------
-
-/** Whether X-Forwarded-For may be believed (a reverse proxy we run sits in
- *  front). Read per call so tests can flip it. */
-export function trustProxy(
-    env: Record<string, string | undefined> = process.env,
-): boolean {
-    return env.TRUST_PROXY === "1";
-}
 
 const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
 const HEXTET = /^[0-9a-f]{1,4}$/i;

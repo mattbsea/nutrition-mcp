@@ -7704,23 +7704,55 @@ describe("/mcp transport posture", () => {
         expect(r.status).toBe(415);
     });
 
-    test("the icon URL follows the forwarding headers", async () => {
-        await withHttpClient(
-            "u1",
-            { pin: "2026-07-28" },
-            async (client) => {
-                const icons = client.getServerVersion()?.icons ?? [];
-                expect(icons.map((i) => i.src)).toEqual([
-                    "https://nutrition-mcp.com/favicon.ico",
-                    "https://nutrition-mcp.com/icon-192.png",
-                    "https://nutrition-mcp.com/icon-512.png",
-                ]);
-            },
-            {
-                "x-forwarded-proto": "https",
-                "x-forwarded-host": "nutrition-mcp.com",
-            },
-        );
+    test("the icon URL follows the forwarding headers only under TRUST_PROXY=1", async () => {
+        const prev = process.env.TRUST_PROXY;
+        process.env.TRUST_PROXY = "1";
+        try {
+            await withHttpClient(
+                "u1",
+                { pin: "2026-07-28" },
+                async (client) => {
+                    const icons = client.getServerVersion()?.icons ?? [];
+                    expect(icons.map((i) => i.src)).toEqual([
+                        "https://food.example.com/favicon.ico",
+                        "https://food.example.com/icon-192.png",
+                        "https://food.example.com/icon-512.png",
+                    ]);
+                },
+                {
+                    "x-forwarded-proto": "https",
+                    "x-forwarded-host": "food.example.com",
+                },
+            );
+        } finally {
+            if (prev === undefined) delete process.env.TRUST_PROXY;
+            else process.env.TRUST_PROXY = prev;
+        }
+    });
+
+    test("without TRUST_PROXY forged forwarding headers do not steer the icon URLs", async () => {
+        const prev = process.env.TRUST_PROXY;
+        delete process.env.TRUST_PROXY;
+        try {
+            await withHttpClient(
+                "u1",
+                { pin: "2026-07-28" },
+                async (client) => {
+                    const icons = client.getServerVersion()?.icons ?? [];
+                    expect(icons.length).toBeGreaterThan(0);
+                    for (const i of icons) {
+                        expect(i.src).toStartWith("http://test.local/");
+                        expect(i.src).not.toContain("evil");
+                    }
+                },
+                {
+                    "x-forwarded-proto": "https",
+                    "x-forwarded-host": "evil.example",
+                },
+            );
+        } finally {
+            if (prev !== undefined) process.env.TRUST_PROXY = prev;
+        }
     });
 
     // With no forwarding headers the icon falls back to the request's own

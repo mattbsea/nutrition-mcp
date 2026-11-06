@@ -16,3 +16,16 @@ export function maskIp(forwardedFor: string | undefined): string {
     if (octets.length !== 4 || octets.some((o) => o === "")) return "-";
     return `${octets[0]}.${octets[1]}.${octets[2]}.x`;
 }
+
+/**
+ * Whether proxy-supplied headers (X-Forwarded-For/-Host/-Proto) may be
+ * believed: only when the operator says a reverse proxy WE run sits in front
+ * (TRUST_PROXY=1). Without it every one of them is attacker-controlled. Lives
+ * here, not in perimeter.ts, so url.ts can use it without an import cycle.
+ * Read per call so tests can flip it.
+ */
+export function trustProxy(
+    env: Record<string, string | undefined> = process.env,
+): boolean {
+    return env.TRUST_PROXY === "1";
+}

@@ -628,6 +628,13 @@ describe("the rest of the surface", () => {
     test("HSTS only over https", async () => {
         const plain = await call("/health");
         expect(plain.headers.get("strict-transport-security")).toBeNull();
+        // A forged header does nothing without TRUST_PROXY ...
+        const forged = await call("/health", {
+            headers: { "x-forwarded-proto": "https" },
+        });
+        expect(forged.headers.get("strict-transport-security")).toBeNull();
+        // ... and is honoured behind our own proxy.
+        process.env.TRUST_PROXY = "1";
         const https = await call("/health", {
             headers: { "x-forwarded-proto": "https" },
         });

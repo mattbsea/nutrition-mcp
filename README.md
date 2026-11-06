@@ -56,14 +56,14 @@ There is exactly one user and one credential per surface:
 
 See [.env.example](.env.example). The ones that matter:
 
-| Variable                         | Meaning                                                                                                                                    |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `DATA_DIR`                       | Where everything lives (`nutrition.db`, `keys.json`, `exports/`). Default `./data`, `/data` in the container.                              |
-| `MCP_KEY`                        | The MCP path key (≥ 32 chars, letters, digits, `-`, `_`). Generated and persisted when unset.                                              |
-| `TRUST_PROXY`                    | `1` behind a reverse proxy you control: failure counting then uses the rightmost `X-Forwarded-For` entry. Otherwise the header is ignored. |
-| `PUBLIC_URL`                     | Public origin, used to build the export link the tool returns.                                                                             |
-| `USDA_API_KEY`, `OFF_USER_AGENT` | Food lookups. Open Food Facts requires a User-Agent with a contact.                                                                        |
-| `PORT`, `HOST`                   | Listen address (`8080`, `0.0.0.0`).                                                                                                        |
+| Variable                         | Meaning                                                                                                                                                                                                                                                         |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DATA_DIR`                       | Where everything lives (`nutrition.db`, `keys.json`, `exports/`). Default `./data`, `/data` in the container.                                                                                                                                                   |
+| `MCP_KEY`                        | The MCP path key (≥ 32 chars, letters, digits, `-`, `_`). Generated and persisted when unset.                                                                                                                                                                   |
+| `TRUST_PROXY`                    | `1` behind a reverse proxy you control: failure counting uses the rightmost `X-Forwarded-For` entry and `X-Forwarded-Host`/`-Proto` build the advertised URLs (HSTS, icons). Otherwise those headers are ignored. `PUBLIC_URL` overrides the advertised origin. |
+| `PUBLIC_URL`                     | Public origin, used to build the export link the tool returns.                                                                                                                                                                                                  |
+| `USDA_API_KEY`, `OFF_USER_AGENT` | Food lookups. Open Food Facts requires a User-Agent with a contact.                                                                                                                                                                                             |
+| `PORT`, `HOST`                   | Listen address (`8080`, `0.0.0.0`).                                                                                                                                                                                                                             |
 
 ## Run
 

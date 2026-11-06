@@ -9,9 +9,9 @@ import {
     mcpKeyGuard,
     notFound,
     securityHeaders,
-    trustProxy,
     type ServerEnv,
 } from "./perimeter.js";
+import { trustProxy } from "./net.js";
 import { getKeys, dataDir, type KeyStore } from "./keys.js";
 import {
     EXPORT_DOWNLOAD_PATH,
