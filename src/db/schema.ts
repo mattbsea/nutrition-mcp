@@ -353,6 +353,25 @@ CREATE TABLE health_sync_sent (
 ) STRICT;
 `;
 
+// ---------------------------------------------------------------------------
+// Migration 3: dashboard login sessions (server-side, so logout and
+// "sign out everywhere" really revoke). Not an owner table: a row holds no
+// nutrition data, only the hash of a random session token.
+// ---------------------------------------------------------------------------
+const V3 = `
+CREATE TABLE dashboard_sessions (
+    -- SHA-256 (hex) of the random token in the cookie: a stolen database file
+    -- cannot be turned back into a usable cookie.
+    id TEXT PRIMARY KEY CHECK (length(id) = 64),
+    -- Per-session CSRF token, embedded in every form the session is shown.
+    csrf TEXT NOT NULL CHECK (length(csrf) >= 32),
+    created_at TEXT NOT NULL ${isoTs("created_at")},
+    last_seen_at TEXT NOT NULL ${isoTs("last_seen_at")},
+    expires_at TEXT NOT NULL ${isoTs("expires_at")}
+) STRICT;
+CREATE INDEX idx_dashboard_sessions_expires ON dashboard_sessions (expires_at);
+`;
+
 export interface Migration {
     version: number;
     name: string;
@@ -367,6 +386,7 @@ export interface Migration {
 export const MIGRATIONS: readonly Migration[] = [
     { version: 1, name: "initial_schema", sql: V1 },
     { version: 2, name: "health_sync_ledger", sql: V2 },
+    { version: 3, name: "dashboard_sessions", sql: V3 },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
@@ -389,3 +409,7 @@ export const TABLES = [
     "health_sync_days",
     "health_sync_sent",
 ] as const;
+
+/** Tables that hold no owner data (login sessions): excluded from the owner
+ *  audit and from delete_account, which is about nutrition data. */
+export const INFRA_TABLES = ["dashboard_sessions"] as const;

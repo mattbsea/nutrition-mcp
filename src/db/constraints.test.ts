@@ -489,7 +489,7 @@ describe("STRICT tables", () => {
                 "SELECT name, strict FROM pragma_table_list WHERE schema='main' AND name NOT LIKE 'sqlite_%'",
             )
             .all();
-        expect(rows.length).toBe(15);
+        expect(rows.length).toBe(16); // 15 data tables + dashboard_sessions
         for (const r of rows) expect([r.name, r.strict]).toEqual([r.name, 1]);
         db.close();
     });

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertSingleOwner, openDb, runMigrations } from "./migrate";
-import { MIGRATIONS, SCHEMA_VERSION, TABLES } from "./schema";
+import { INFRA_TABLES, MIGRATIONS, SCHEMA_VERSION, TABLES } from "./schema";
 import { OWNER_ID } from "./owner";
 
 const dirs: string[] = [];
@@ -21,9 +21,9 @@ const tableNames = (db: Database) =>
         .map((r) => r.name);
 
 describe("schema", () => {
-    test("creates exactly the 15 tables", () => {
+    test("creates exactly the 15 data tables plus the session table", () => {
         const db = openDb(":memory:");
-        expect(tableNames(db)).toEqual([...TABLES].sort());
+        expect(tableNames(db)).toEqual([...TABLES, ...INFRA_TABLES].sort());
         expect(TABLES.length).toBe(15);
         db.close();
     });
