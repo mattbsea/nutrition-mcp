@@ -305,6 +305,54 @@ CREATE TABLE health_activity_links (
 ) STRICT;
 `;
 
+// ---------------------------------------------------------------------------
+// Migration 2: the hourly "sent so far" ledger for Apple Health sync.
+//
+// The shortcut now authenticates with one static key (no pairing, no per-link
+// tokens), so the four link/pending tables go. The ledger changes shape too:
+// instead of one JSON blob per day plus top-up bookkeeping, every day/field
+// carries the running total Health already holds ("sent so far"), and the day
+// carries a round counter that makes an entry id stable and an ack idempotent.
+// No database existed when this ran for the first time (nothing to migrate).
+// ---------------------------------------------------------------------------
+const V2 = `
+DROP TABLE health_sync_pending;
+DROP TABLE health_sync_links;
+DROP TABLE health_sync_days;
+DROP TABLE health_activity_links;
+
+-- One row per owner: the sync lease and the "last seen" clocks.
+CREATE TABLE health_sync_state (
+    user_id TEXT PRIMARY KEY,
+    lease_until TEXT ${isoTs("lease_until")},
+    last_sync_at TEXT ${isoTs("last_sync_at")},
+    last_ack_at TEXT ${isoTs("last_ack_at")},
+    last_activity_at TEXT ${isoTs("last_activity_at")}
+) STRICT;
+
+-- One row per local day that has had at least one acknowledged entry.
+-- rounds = how many entries were acknowledged; the next entry id is rounds + 1.
+CREATE TABLE health_sync_days (
+    user_id TEXT NOT NULL,
+    date TEXT NOT NULL ${isoDate("date")},
+    timezone TEXT NOT NULL,
+    rounds INTEGER NOT NULL DEFAULT 0 CHECK (rounds >= 0),
+    first_sent_at TEXT ${isoTs("first_sent_at")},
+    last_sent_at TEXT ${isoTs("last_sent_at")},
+    PRIMARY KEY (user_id, date)
+) STRICT;
+
+-- "Sent so far": what Health holds from us for a day and field.
+CREATE TABLE health_sync_sent (
+    user_id TEXT NOT NULL,
+    date TEXT NOT NULL ${isoDate("date")},
+    field TEXT NOT NULL CHECK (field IN ('energy_kcal', 'protein_g', 'carbohydrates_g', 'fat_g', 'fiber_g', 'caffeine_mg', 'water_ml')),
+    sent REAL NOT NULL CHECK (sent >= 0),
+    PRIMARY KEY (user_id, date, field),
+    FOREIGN KEY (user_id, date) REFERENCES health_sync_days (user_id, date) ON DELETE CASCADE
+) STRICT;
+`;
+
 export interface Migration {
     version: number;
     name: string;
@@ -318,11 +366,12 @@ export interface Migration {
  */
 export const MIGRATIONS: readonly Migration[] = [
     { version: 1, name: "initial_schema", sql: V1 },
+    { version: 2, name: "health_sync_ledger", sql: V2 },
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1]!.version;
 
-/** The tables migration 1 creates (used by tests and the startup audit). */
+/** The tables after the latest migration (used by tests and the startup audit). */
 export const TABLES = [
     "saved_meals",
     "meals",
@@ -336,8 +385,7 @@ export const TABLES = [
     "active_calories_log",
     "profiles",
     "food_cache",
-    "health_sync_pending",
-    "health_sync_links",
+    "health_sync_state",
     "health_sync_days",
-    "health_activity_links",
+    "health_sync_sent",
 ] as const;

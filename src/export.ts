@@ -12,13 +12,10 @@ import {
     getNutritionGoalsHistory,
     getProfile,
     timezoneFromProfile,
-    createSqliteHealthActivityLinkStore,
     createSqliteHealthSyncStore,
     type BodyMeasurementEntry,
-    type HealthActivityLinkStatus,
-    type HealthActivityLinkStore,
     type HealthSyncDayRow,
-    type HealthSyncLinkStatus,
+    type HealthSyncStateRow,
     type HealthSyncStore,
     type Meal,
     type NutritionGoals,
@@ -781,73 +778,32 @@ export function buildProfileCsv(profile: Profile | null, tz: string): string {
     return rows.join("\n");
 }
 
-/**
- * Column order for connections.csv. Parallel array with the row builder
- * below. No token or hash column, by design: link tokens are stored only as
- * hashes, and the export is a copy of your data, not a set of credentials.
- *
- * One row per Apple Health shortcut link (at most one of each kind): when it
- * was created, last used and last synced, which totals it sends, the first day
- * it may send and the phone's own timezone, which is a stored setting and NOT
- * the zone the timestamps here are rendered in (that one is `timezone`).
- */
-const CONNECTIONS_CSV_COLUMNS = [
-    "kind",
-    "name",
-    "created_at",
-    "expires_at",
-    "last_used_at",
-    "last_sync_at",
+/** Column order for health_sync_status.csv: the sync clocks, one row. */
+const HEALTH_SYNC_STATUS_CSV_COLUMNS = [
+    "last_check_at",
+    "last_values_written_at",
+    "last_activity_sync_at",
     "timezone",
-    "synced_fields",
-    "sync_start_date",
-    "device_timezone",
 ] as const;
 
-/** What connections.csv calls the Apple Health sync link. */
-const HEALTH_SYNC_CONNECTION_NAME = "Apple Health sync (iOS Shortcut)";
-
-/** What connections.csv calls the activity shortcut's link. */
-const HEALTH_ACTIVITY_CONNECTION_NAME =
-    "Apple Health activity sync (iOS Shortcut)";
-
-/** Build connections.csv: the Apple Health shortcut links that exist. */
-export function buildConnectionsCsv(
+/** Build health_sync_status.csv: when the Apple Health shortcuts last checked
+ *  in, last wrote values to Health, and last sent Active Energy. Header-only
+ *  when no shortcut has ever called. */
+export function buildHealthSyncStatusCsv(
+    state: HealthSyncStateRow | null,
     tz: string,
-    healthSync: HealthSyncLinkStatus | null = null,
-    activitySync: HealthActivityLinkStatus | null = null,
 ): string {
-    const out = [CONNECTIONS_CSV_COLUMNS.join(",")];
-    if (healthSync) {
+    const out = [HEALTH_SYNC_STATUS_CSV_COLUMNS.join(",")];
+    if (
+        state &&
+        (state.last_sync_at || state.last_ack_at || state.last_activity_at)
+    ) {
         out.push(
             [
-                csvEscape("health_sync"),
-                csvEscape(HEALTH_SYNC_CONNECTION_NAME),
-                csvEscape(localOrNull(healthSync.created_at, tz)),
-                csvEscape(localOrNull(healthSync.expires_at, tz)),
-                csvEscape(localOrNull(healthSync.last_used_at, tz)),
-                csvEscape(localOrNull(healthSync.last_sync_at, tz)),
+                csvEscape(localOrNull(state.last_sync_at, tz)),
+                csvEscape(localOrNull(state.last_ack_at, tz)),
+                csvEscape(localOrNull(state.last_activity_at, tz)),
                 csvEscape(tz),
-                csvEscape(healthSync.fields.join(" ")),
-                csvEscape(healthSync.sync_start_date),
-                csvEscape(healthSync.fallback_tz),
-            ].join(","),
-        );
-    }
-    if (activitySync) {
-        out.push(
-            [
-                csvEscape("health_activity_sync"),
-                csvEscape(HEALTH_ACTIVITY_CONNECTION_NAME),
-                csvEscape(localOrNull(activitySync.created_at, tz)),
-                csvEscape(localOrNull(activitySync.expires_at, tz)),
-                csvEscape(localOrNull(activitySync.last_used_at, tz)),
-                csvEscape(localOrNull(activitySync.last_sync_at, tz)),
-                csvEscape(tz),
-                // It sends nothing to Apple Health and has no start date.
-                "",
-                "",
-                csvEscape(activitySync.fallback_tz),
             ].join(","),
         );
     }
@@ -864,7 +820,7 @@ const HEALTH_SYNC_CSV_COLUMNS = [
     "date",
     "timezone",
     ...HEALTH_SYNC_FIELDS,
-    "topup_seq",
+    "rounds",
     "first_sent_at",
     "last_sent_at",
 ] as const;
@@ -887,13 +843,13 @@ export function buildHealthSyncCsv(
         // holds an unknown one falls back to the account's rather than
         // throwing the whole export away.
         const zone = validateTz(r.timezone) ? r.timezone : tz;
-        const sent = r.sent_values ?? {};
+        const sent = r.sent;
         out.push(
             [
                 csvEscape(r.date),
                 csvEscape(zone),
                 ...HEALTH_SYNC_FIELDS.map((f) => csvEscape(sent[f])),
-                csvEscape(r.topup_seq),
+                csvEscape(r.rounds),
                 csvEscape(localOrNull(r.first_sent_at, zone)),
                 csvEscape(localOrNull(r.last_sent_at, zone)),
             ].join(","),
@@ -919,7 +875,7 @@ export const EXPORT_ARCHIVE_FILES = [
     "goals.csv",
     "goals_history.csv",
     "profile.csv",
-    "connections.csv",
+    "health_sync_status.csv",
     "health_sync.csv",
     "README.txt",
 ] as const;
@@ -971,8 +927,8 @@ export function buildExportReadme(opts: {
         "goals.csv    your current daily targets — one row, or a header alone if you have never set goals.",
         `goals_history.csv ${rows(counts.goalsHistory)} — every change to your daily targets, oldest first: when the new values took effect (effective_at) and the targets from then on, in the same columns and units as goals.csv. Goals set before this history was kept appear once, as of their last change.`,
         "profile.csv  your settings: timezone, preferred weight, length and drink units (empty preferred_length_unit = never chosen), display toggles, widget language and activity_credit_pct (the share of active calories that counts against intake for entries logged from now on; empty = never chosen, which counts as 100) — one row, or a header alone if you have no profile yet. An empty locale means no widget language was ever chosen, so widgets use English.",
-        `connections.csv ${rows(counts.connections)} — the Apple Health shortcut links, if any: when each was created, last used and last synced, when it expires and, for the Health shortcut, which totals it sends (synced_fields), the first day it may send (sync_start_date) and the iPhone's own timezone (device_timezone, a saved setting — the timestamps are still in the "timezone" column's zone). The Activity shortcut's row sends nothing to Apple Health, so synced_fields and sync_start_date are empty. No link token is included.`,
-        `health_sync.csv ${rows(counts.healthSync)} — what Apple Health sync sent to your iPhone, one row per day, kept for ${HEALTH_SYNC_RETENTION_DAYS} days: the daily totals sent (${HEALTH_SYNC_FIELDS.join(", ")}), how many later top-ups were sent for the day (topup_seq) and when the first and last were sent. Each row is in its own "timezone" — the zone the day was counted in, which can differ from your profile's if your phone was elsewhere — and its date and times are wall clocks there. An empty value was not sent; a row with no values was offered but not yet confirmed by the phone. Alcohol is never sent.`,
+        `health_sync_status.csv ${rows(counts.syncStatus)} — when the Apple Health shortcuts last checked in, last wrote values to Health, and last sent Active Energy. A header alone when no shortcut has ever called. No key is included.`,
+        `health_sync.csv ${rows(counts.healthSync)} — what Apple Health sync has told your iPhone, one row per day, kept for ${HEALTH_SYNC_RETENTION_DAYS} days: the running total sent so far per field (${HEALTH_SYNC_FIELDS.join(", ")}) and how many entries were acknowledged (rounds). Each row is in its own "timezone" — the zone the day was counted in, which can differ from your profile's if your phone was elsewhere — and its date and times are wall clocks there. An empty value was never sent. Alcohol is never sent.`,
         "README.txt   this file.",
         "",
         "Where the values came from",
@@ -999,7 +955,7 @@ export function buildExportReadme(opts: {
         "Re-importing",
         "------------",
         "Only meals.csv can be read back in. Hand it to start_meal_import (which parses it in your browser) or to bulk_import_meals; its column names are exactly the ones the importer expects, and re-importing the same file twice is a no-op rather than a set of duplicates.",
-        "Every other file is export-only — there is no import path for meal ingredients, saved meals, water, active calories, weight, body measurements, goals, profile, connections or Apple Health sync, so keep this archive if you want that history back.",
+        "Every other file is export-only — there is no import path for meal ingredients, saved meals, water, active calories, weight, body measurements, goals, profile or Apple Health sync, so keep this archive if you want that history back.",
         "",
         "Not in this archive",
         "-------------------",
@@ -1027,8 +983,8 @@ export interface ExportCounts {
     bodyMeasurements: number;
     /** Rows in goals_history.csv. */
     goalsHistory: number;
-    /** Apple Health shortcut link rows (at most one of each kind). */
-    connections: number;
+    /** Rows in health_sync_status.csv: 1 once a shortcut has called, else 0. */
+    syncStatus: number;
     /** Days in health_sync.csv. */
     healthSync: number;
 }
@@ -1060,7 +1016,6 @@ export async function exportAllData(
     // Injectable for tests; every other reader here is a src/db/repo function.
     deps: {
         healthSync?: HealthSyncStore;
-        healthActivity?: Pick<HealthActivityLinkStore, "getActivityLinkStatus">;
         getGoalsHistory?: (
             userId: string,
         ) => Promise<NutritionGoalsHistoryRow[]>;
@@ -1072,8 +1027,6 @@ export async function exportAllData(
     } = {},
 ): Promise<FullExportResult> {
     const healthSync = deps.healthSync ?? createSqliteHealthSyncStore();
-    const healthActivity =
-        deps.healthActivity ?? createSqliteHealthActivityLinkStore();
     const getGoalsHistory = deps.getGoalsHistory ?? getNutritionGoalsHistory;
     const [
         meals,
@@ -1087,9 +1040,8 @@ export async function exportAllData(
         goals,
         goalsHistory,
         profile,
-        healthSyncLink,
+        healthSyncState,
         healthSyncDays,
-        activitySyncLink,
     ] = await Promise.all([
         getAllMeals(userId),
         getAllMealItems(userId),
@@ -1102,9 +1054,8 @@ export async function exportAllData(
         getNutritionGoals(userId),
         getGoalsHistory(userId),
         getProfile(userId),
-        healthSync.getLinkStatus(userId),
-        healthSync.getDaysForExport(userId),
-        healthActivity.getActivityLinkStatus(userId),
+        healthSync.getState(userId),
+        healthSync.getDays(userId, "0000-01-01", "9999-12-31"),
     ]);
 
     const counts: ExportCounts = {
@@ -1117,7 +1068,12 @@ export async function exportAllData(
         weight: weight.length,
         bodyMeasurements: bodyMeasurements.length,
         goalsHistory: goalsHistory.length,
-        connections: (healthSyncLink ? 1 : 0) + (activitySyncLink ? 1 : 0),
+        syncStatus:
+            healthSyncState.last_sync_at ||
+            healthSyncState.last_ack_at ||
+            healthSyncState.last_activity_at
+                ? 1
+                : 0,
         healthSync: healthSyncDays.length,
     };
 
@@ -1159,11 +1115,7 @@ export async function exportAllData(
         "goals.csv": buildGoalsCsv(goals, tz),
         "goals_history.csv": buildGoalsHistoryCsv(goalsHistory, tz),
         "profile.csv": buildProfileCsv(profile, tz),
-        "connections.csv": buildConnectionsCsv(
-            tz,
-            healthSyncLink,
-            activitySyncLink,
-        ),
+        "health_sync_status.csv": buildHealthSyncStatusCsv(healthSyncState, tz),
         "health_sync.csv": buildHealthSyncCsv(healthSyncDays, tz),
         "README.txt": buildExportReadme({
             generatedAt,

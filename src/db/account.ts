@@ -22,10 +22,9 @@ export function exportStoragePaths(userId: string): string[] {
  * The shared food_cache holds public reference data and is kept.
  */
 const OWNER_TABLES = [
-    "health_activity_links",
-    "health_sync_links",
+    "health_sync_sent",
     "health_sync_days",
-    "health_sync_pending",
+    "health_sync_state",
     "water_log",
     "active_calories_log",
     "weight_log",

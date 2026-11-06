@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { handleMcp, closeMcpHandler } from "./mcp.js";
+import { createHealthSyncRouter } from "./health-sync-routes.js";
 import {
     MCP_PATH_PREFIX,
     accessLog,
@@ -32,6 +33,10 @@ const PUBLIC_ICONS: Record<string, string> = {
 export interface AppOptions {
     /** The MCP path key. A function so tests can change it mid-run. */
     mcpKey: () => string;
+    /** The Apple Health shortcut API's bearer key. */
+    shortcutKey: () => string;
+    /** Test seam: replaces the default health-sync router deps. */
+    healthSync?: Omit<Parameters<typeof createHealthSyncRouter>[0], "key">;
     /** HMAC secret for export links. */
     exportSecret: () => string;
     /** DATA_DIR (export archives live under it). */
@@ -53,7 +58,7 @@ export function setShuttingDownForTest(value: boolean): void {
  *   GET  /exports/download?exp=&sig=     signed, short-lived export download
  *   GET  /health                         liveness
  *   GET  /favicon.ico, /icon-*.png ...   the server icon advertised over MCP
- *   *    /api/v1/health-sync/*           501 until step B
+ *   *    /api/v1/health-sync/*           Apple Health shortcut API (bearer key)
  *
  * No CORS middleware is installed at all: the API is called by Claude's servers
  * and by iOS Shortcuts, never by a page in a browser, so cross-origin access
@@ -99,13 +104,12 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
         return c.json({ error: "shutting_down" }, 503, { "Retry-After": "1" });
     });
 
-    // The Apple Health sync API is rebuilt in step B (shortcut_key auth).
-    const notAvailableYet = (c: Parameters<typeof notFound>[0]) =>
-        c.json({ ok: false, error: "not_available_yet" }, 501, {
-            "Cache-Control": "private, no-store",
-        });
-    app.all("/api/v1/health-sync", notAvailableYet);
-    app.all("/api/v1/health-sync/*", notAvailableYet);
+    // Apple Health shortcut API: `Authorization: Bearer <shortcut key>` (a
+    // different credential from the MCP path key), its own envelope.
+    app.route(
+        "/",
+        createHealthSyncRouter({ key: opts.shortcutKey, ...opts.healthSync }),
+    );
 
     // MCP: the key in the path is the only credential. mcpKeyGuard answers a
     // wrong/missing key with the generic 404 BEFORE the body is touched.
@@ -173,6 +177,14 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
     return app;
 }
 
+function shortcutKeyLine(keys: KeyStore): string {
+    if (keys.shortcutKeyFromEnv)
+        return "[keys] shortcut key taken from the SHORTCUT_KEY environment variable";
+    if (keys.shortcutKeyGenerated)
+        return `[keys] generated a new shortcut key and saved it to ${keys.file} (field "shortcut_key"); the Apple Health shortcuts send it as a bearer token`;
+    return `[keys] shortcut key loaded from ${keys.file} (field "shortcut_key")`;
+}
+
 function startupKeyLine(keys: KeyStore): string {
     if (keys.mcpKeyFromEnv)
         return "[keys] MCP access key taken from the MCP_KEY environment variable";
@@ -187,8 +199,13 @@ function startupKeyLine(keys: KeyStore): string {
  */
 async function boot(): Promise<Hono<{ Bindings: ServerEnv }>> {
     const keys = getKeys();
-    installLogRedaction(() => [keys.mcpKey, keys.exportSecret]);
+    installLogRedaction(() => [
+        keys.mcpKey,
+        keys.shortcutKey,
+        keys.exportSecret,
+    ]);
     console.log(startupKeyLine(keys));
+    console.log(shortcutKeyLine(keys));
     if (trustProxy())
         console.log(
             "[net] TRUST_PROXY=1: using the rightmost X-Forwarded-For entry",
@@ -203,6 +220,7 @@ async function boot(): Promise<Hono<{ Bindings: ServerEnv }>> {
 
     return createApp({
         mcpKey: () => keys.mcpKey,
+        shortcutKey: () => keys.shortcutKey,
         exportSecret: () => keys.exportSecret,
         dataDir: dataDir(),
     });

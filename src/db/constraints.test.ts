@@ -79,29 +79,25 @@ const BASES: Record<string, (db: Database) => Row> = {
     active_calories_log: () => ({ user_id: U, kcal: 100, credit_pct: 100 }),
     profiles: () => ({ user_id: U }),
     food_cache: () => ({ source: "usda", source_id: "1", payload: "{}" }),
-    health_sync_pending: () => ({
-        connect_id_hash: "c",
-        device_secret_hash: "d",
-        fields: "[]",
-        expires_at: NOW,
-    }),
-    health_sync_links: () => ({
-        user_id: U,
-        token_hash: "t",
-        fields: "[]",
-        sync_start_date: "2026-03-10",
-        expires_at: NOW,
-    }),
+    health_sync_state: () => ({ user_id: U }),
     health_sync_days: () => ({
         user_id: U,
         date: "2026-03-10",
         timezone: "UTC",
     }),
-    health_activity_links: () => ({
-        user_id: U,
-        token_hash: "t",
-        expires_at: NOW,
-    }),
+    health_sync_sent: (db) => {
+        insert(db, "health_sync_days", {
+            user_id: U,
+            date: "2026-03-10",
+            timezone: "UTC",
+        });
+        return {
+            user_id: U,
+            date: "2026-03-10",
+            field: "energy_kcal",
+            sent: 100,
+        };
+    },
 };
 
 type Case = [table: string, label: string, override: Row, expected: RegExp];
@@ -334,47 +330,27 @@ add("food_cache", "payload is JSON", { payload: "nope" }, CHECK);
 add("food_cache", "fetched_at ISO", { fetched_at: "garbage" }, CHECK);
 
 // ---- Health
-add("health_sync_pending", "kind enum", { kind: "weird" }, CHECK);
-add("health_sync_pending", "backfill_days <= 7", { backfill_days: 8 }, CHECK);
-add("health_sync_pending", "backfill_days >= 0", { backfill_days: -1 }, CHECK);
-add("health_sync_pending", "fields is a JSON array", { fields: "{}" }, CHECK);
-add("health_sync_pending", "fields required", { fields: null }, NOTNULL);
+
+// ---- Apple Health ledger
+add("health_sync_state", "lease_until ISO", { lease_until: "later" }, CHECK);
+add("health_sync_state", "last_sync_at ISO", { last_sync_at: "x" }, CHECK);
+add("health_sync_state", "last_ack_at ISO", { last_ack_at: "x" }, CHECK);
 add(
-    "health_sync_pending",
-    "connect_id_hash required",
-    { connect_id_hash: null },
-    NOTNULL,
-);
-add("health_sync_pending", "expires_at ISO", { expires_at: "soon" }, CHECK);
-add(
-    "health_sync_pending",
-    "claim_expires_at ISO",
-    { claim_expires_at: "soon" },
+    "health_sync_state",
+    "last_activity_at ISO",
+    { last_activity_at: "x" },
     CHECK,
 );
-add("health_sync_links", "kind enum", { kind: "other" }, CHECK);
-add("health_sync_links", "fields is a JSON array", { fields: "{}" }, CHECK);
-add(
-    "health_sync_links",
-    "sync_start_date is a date",
-    { sync_start_date: "garbage" },
-    CHECK,
-);
-add("health_sync_links", "lease_until ISO", { lease_until: "later" }, CHECK);
-add("health_sync_links", "expires_at ISO", { expires_at: "soon" }, CHECK);
-add("health_sync_links", "token_hash required", { token_hash: null }, NOTNULL);
 add("health_sync_days", "date is a date", { date: "garbage" }, CHECK);
-add("health_sync_days", "sent_values JSON", { sent_values: "not json" }, CHECK);
-add("health_sync_days", "notified JSON", { notified: "x" }, CHECK);
+add("health_sync_days", "rounds >= 0", { rounds: -1 }, CHECK);
+add("health_sync_days", "rounds is integral", { rounds: 1.5 }, TYPE);
 add("health_sync_days", "timezone required", { timezone: null }, NOTNULL);
 add("health_sync_days", "first_sent_at ISO", { first_sent_at: "x" }, CHECK);
-add("health_activity_links", "expires_at ISO", { expires_at: "soon" }, CHECK);
-add(
-    "health_activity_links",
-    "token_hash required",
-    { token_hash: null },
-    NOTNULL,
-);
+add("health_sync_days", "last_sent_at ISO", { last_sent_at: "x" }, CHECK);
+add("health_sync_sent", "field enum", { field: "alcohol_g" }, CHECK);
+add("health_sync_sent", "sent >= 0", { sent: -1 }, CHECK);
+add("health_sync_sent", "sent is a number", { sent: "abc" }, TYPE);
+add("health_sync_sent", "needs its day row", { date: "2026-03-11" }, FK);
 
 describe("every table accepts its valid base row (positive control)", () => {
     for (const [table, base] of Object.entries(BASES)) {
@@ -452,33 +428,12 @@ describe("uniqueness", () => {
     test("profiles: one row per owner", () => dupe("profiles"));
     test("food_cache: (source, source_id)", () =>
         dupe("food_cache", { payload: "[]" }));
+    test("health_sync_state: one row per owner", () =>
+        dupe("health_sync_state"));
     test("health_sync_days: (user, date)", () =>
         dupe("health_sync_days", { timezone: "X" }));
-    test("health_sync_pending: connect_id_hash", () =>
-        dupe("health_sync_pending", { device_secret_hash: "z" }));
-    test("health_sync_pending: claim_code_hash", () => {
-        const db = openDb(":memory:");
-        insert(db, "health_sync_pending", {
-            ...BASES.health_sync_pending!(db),
-            claim_code_hash: "k",
-        });
-        expect(() =>
-            insert(db, "health_sync_pending", {
-                ...BASES.health_sync_pending!(db),
-                connect_id_hash: "c2",
-                claim_code_hash: "k",
-            }),
-        ).toThrow(UNIQUE);
-        db.close();
-    });
-    test("health_sync_links: one per owner, unique token_hash", () => {
-        dupe("health_sync_links", { token_hash: "t2" });
-        dupe("health_sync_links", {}, { user_id: "other" });
-    });
-    test("health_activity_links: one per owner, unique token_hash", () => {
-        dupe("health_activity_links", { token_hash: "t2" });
-        dupe("health_activity_links", {}, { user_id: "other" });
-    });
+    test("health_sync_sent: (user, date, field)", () =>
+        dupe("health_sync_sent", { sent: 5 }));
 
     for (const table of [
         "meals",
@@ -534,7 +489,7 @@ describe("STRICT tables", () => {
                 "SELECT name, strict FROM pragma_table_list WHERE schema='main' AND name NOT LIKE 'sqlite_%'",
             )
             .all();
-        expect(rows.length).toBe(16);
+        expect(rows.length).toBe(15);
         for (const r of rows) expect([r.name, r.strict]).toEqual([r.name, 1]);
         db.close();
     });

@@ -86,11 +86,8 @@ import {
     type Profile,
     type WeightEntry,
     type BodyMeasurementEntry,
-    createSqliteHealthActivityLinkStore,
     createSqliteHealthSyncStore,
-    type HealthActivityLinkStatus,
-    type HealthActivityLinkStore,
-    type HealthSyncLinkStatus,
+    type HealthSyncStateRow,
     type HealthSyncStore,
 } from "./db/repo.js";
 import { runTool, categorizeError } from "./tool-runner.js";
@@ -2973,41 +2970,34 @@ export function offNotFoundText(barcode: string): string {
 // startImportPayload for the full trade-off.
 /**
  * get_profile's Apple Health sync line. `undefined` means the status could not
- * be read (the line says so rather than failing the whole profile), `null`
- * means no link. Dates and times are local to `tz`, like the rest of the
- * profile. Describes only: connecting happens from the iPhone shortcut, not
- * through any tool, so there is nothing here to offer.
+ * be read (the line says so rather than failing the whole profile). Times are
+ * local to `tz`, like the rest of the profile. Describes only: the sync is
+ * driven from the iPhone shortcut, not through any tool.
  */
 export function healthSyncProfileLine(
-    status: HealthSyncLinkStatus | null | undefined,
+    state: HealthSyncStateRow | undefined,
     tz: string,
 ): string {
-    if (status === undefined)
+    if (state === undefined)
         return "Apple Health sync: status unavailable right now.";
-    if (status === null) return "Apple Health sync: not connected.";
-    const connected = dateInTz(status.created_at, tz);
-    const sentThrough = status.sent_through ?? "nothing yet";
-    const lastSync = status.last_sync_at
-        ? formatLocalDateTime(status.last_sync_at, tz).slice(0, 16)
-        : "never";
-    return `Apple Health sync: connected ${connected}, sent through ${sentThrough}, last sync ${lastSync}.`;
+    if (!state.last_sync_at)
+        return "Apple Health sync: no shortcut has checked in yet.";
+    const at = (iso: string | null) =>
+        iso ? formatLocalDateTime(iso, tz).slice(0, 16) : "never";
+    return `Apple Health sync: last check ${at(state.last_sync_at)}, last values written to Health ${at(state.last_ack_at)}.`;
 }
 
 /**
- * get_profile's line for the opt-in activity shortcut, or null when it is not
- * connected or its status could not be read: the profile then reads exactly
- * as it did before the activity shortcut existed.
+ * get_profile's line for the activity shortcut, or null when it has never
+ * synced (or its status could not be read): the profile then reads exactly as
+ * it did before the activity shortcut existed.
  */
 export function healthActivityProfileLine(
-    status: HealthActivityLinkStatus | null | undefined,
+    state: HealthSyncStateRow | null | undefined,
     tz: string,
 ): string | null {
-    if (!status) return null;
-    const connected = dateInTz(status.created_at, tz);
-    const lastSync = status.last_sync_at
-        ? formatLocalDateTime(status.last_sync_at, tz).slice(0, 16)
-        : "never";
-    return `Apple Health activity sync: connected ${connected}, reads the daily Active Energy total, last sync ${lastSync}.`;
+    if (!state?.last_activity_at) return null;
+    return `Apple Health activity sync: reads the daily Active Energy total, last sync ${formatLocalDateTime(state.last_activity_at, tz).slice(0, 16)}.`;
 }
 
 // Exported for tests: the only way to exercise a tool handler end-to-end
@@ -8528,7 +8518,7 @@ export function registerTools(
         {
             title: "Export All Data",
             description:
-                "Export EVERYTHING this server stores about the user — meals with their ingredients and the source of each nutrient value (a food record, a value the user gave, or an estimate), saved meals with their ingredients, water, active calories, weight, body measurements, nutrition goals and every dated change to them, profile settings, and the Apple Health sync connections with their 8-day record of what was sent — as a single ZIP archive (meals.csv, meal_items.csv, saved_meals.csv, saved_meal_items.csv, water.csv, active_calories.csv, weight.csv, body_measurements.csv, goals.csv, goals_history.csv, profile.csv, connections.csv, health_sync.csv, plus a README.txt describing the columns, the units they are in, and what is not included) and return a private, time-limited download link (valid 60 minutes). Timestamps use the user's timezone if set, otherwise UTC; health_sync.csv rows use the timezone each day was counted in. Only meals.csv can be read back in; every other file is export-only. This is the server's only export path: it covers a full backup, an account takeout, and a request for the meal history alone, which is meals.csv inside the archive. The link is for the user to download the archive.",
+                "Export EVERYTHING this server stores about the user — meals with their ingredients and the source of each nutrient value (a food record, a value the user gave, or an estimate), saved meals with their ingredients, water, active calories, weight, body measurements, nutrition goals and every dated change to them, profile settings, and the Apple Health sync status with its 8-day record of what was sent — as a single ZIP archive (meals.csv, meal_items.csv, saved_meals.csv, saved_meal_items.csv, water.csv, active_calories.csv, weight.csv, body_measurements.csv, goals.csv, goals_history.csv, profile.csv, health_sync_status.csv, health_sync.csv, plus a README.txt describing the columns, the units they are in, and what is not included) and return a private, time-limited download link (valid 60 minutes). Timestamps use the user's timezone if set, otherwise UTC; health_sync.csv rows use the timezone each day was counted in. Only meals.csv can be read back in; every other file is export-only. This is the server's only export path: it covers a full backup, an account takeout, and a request for the meal history alone, which is meals.csv inside the archive. The link is for the user to download the archive.",
             annotations: {
                 title: "Export All Data",
                 readOnlyHint: false,
@@ -8565,7 +8555,6 @@ export function registerTools(
                     goals ? "nutrition goals" : "no nutrition goals set",
                     `${counts.goalsHistory} goal ${counts.goalsHistory === 1 ? "change" : "changes"}`,
                     profile ? "profile settings" : "no profile settings",
-                    `${counts.connections} Apple Health shortcut connection ${counts.connections === 1 ? "record" : "records"}`,
                     `${counts.healthSync} Apple Health sync ${counts.healthSync === 1 ? "day" : "days"}`,
                 ].join(", ");
                 return {
@@ -8649,13 +8638,13 @@ export function registerTools(
         },
         async () => {
             return runTool("get_profile", async () => {
-                const [profile, healthSync, activitySync] = await Promise.all([
+                const [profile, syncState] = await Promise.all([
                     getProfile(userId),
                     // Read beside the profile, and never allowed to fail
                     // it: the sync status is one line of many, and the
                     // rest of the profile is what this tool is for.
                     createSqliteHealthSyncStore()
-                        .getLinkStatus(userId)
+                        .getState(userId)
                         .catch((err: unknown) => {
                             const ref = newErrorRef();
                             console.warn(
@@ -8663,9 +8652,6 @@ export function registerTools(
                             );
                             return undefined;
                         }),
-                    createSqliteHealthActivityLinkStore()
-                        .getActivityLinkStatus(userId)
-                        .catch(() => undefined),
                 ]);
                 const tz = timezoneFromProfile(profile);
                 const locale = localeFromProfile(profile);
@@ -8697,8 +8683,8 @@ export function registerTools(
                         ? `Alcohol tracking: enabled, displayed in grams alongside ${drinkUnitLabel(drinkUnit)}${preferredDrinkUnitFromProfile(profile) ? "" : " (the default — no preference saved)"}.`
                         : "Alcohol tracking: disabled, so alcohol is hidden from meals, goals and progress. Alcohol already stored is kept, and anything logged with alcohol_g while it is off is still stored. The exception is the file importer, which skips a file's alcohol column while tracking is off and will not backfill it on a later re-import — so tracking has to be on before importing an export whose alcohol the user wants to keep. The user can enable it with set_alcohol_tracking.",
                     activityCreditLine(profile),
-                    healthSyncProfileLine(healthSync, tz ?? "UTC"),
-                    healthActivityProfileLine(activitySync, tz ?? "UTC"),
+                    healthSyncProfileLine(syncState, tz ?? "UTC"),
+                    healthActivityProfileLine(syncState, tz ?? "UTC"),
                 ].filter((l): l is string => l !== null);
 
                 return {
@@ -8840,7 +8826,7 @@ export function registerTools(
         {
             title: "Delete Nutrition Account",
             description:
-                "Permanently delete the user's Nutrition MCP account and all data this service stores about them (meals and their ingredients, saved meals and their ingredients, water, active calories, weight, body measurements, goals, settings, export archives, and the Apple Health sync connections with their record of values sent). Totals already written to Apple Health stay on the user's iPhone. Irreversible. Always confirm with the user before calling this tool.",
+                "Permanently delete the user's Nutrition MCP account and all data this service stores about them (meals and their ingredients, saved meals and their ingredients, water, active calories, weight, body measurements, goals, settings, export archives, and the Apple Health sync record). Totals already written to Apple Health stay on the user's iPhone. Irreversible. Always confirm with the user before calling this tool.",
             annotations: {
                 title: "Delete Nutrition Account",
                 readOnlyHint: false,

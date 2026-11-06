@@ -21,10 +21,10 @@ const tableNames = (db: Database) =>
         .map((r) => r.name);
 
 describe("schema", () => {
-    test("creates exactly the 16 retained tables", () => {
+    test("creates exactly the 15 tables", () => {
         const db = openDb(":memory:");
         expect(tableNames(db)).toEqual([...TABLES].sort());
-        expect(TABLES.length).toBe(16);
+        expect(TABLES.length).toBe(15);
         db.close();
     });
 

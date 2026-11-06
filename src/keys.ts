@@ -4,6 +4,10 @@
  *  - mcp_key      the secret in the MCP URL path (/mcp/<key>). MCP_KEY in the
  *                 environment wins (and is then never written to disk);
  *                 otherwise 48 random bytes, base64url, generated once.
+ *  - shortcut_key  the bearer key of the Apple Health shortcut API. SHORTCUT_KEY
+ *                 in the environment wins; otherwise generated like mcp_key.
+ *                 It must differ from the MCP key: a leaked shortcut must not
+ *                 open the MCP endpoint or the other way round.
  *  - export_secret HMAC key that signs export download links.
  *
  * The file is read-modify-written so later steps can add their own keys
@@ -28,6 +32,10 @@ export interface KeyStore {
     mcpKeyFromEnv: boolean;
     /** True when this call generated and persisted a new mcp_key. */
     mcpKeyGenerated: boolean;
+    /** The shortcut API's bearer key (env override or persisted). */
+    shortcutKey: string;
+    shortcutKeyFromEnv: boolean;
+    shortcutKeyGenerated: boolean;
     exportSecret: string;
     /** Absolute path of keys.json. */
     file: string;
@@ -107,11 +115,40 @@ export function loadKeys(
         dirty = true;
     }
 
+    const shortcutEnv = env.SHORTCUT_KEY?.trim();
+    if (
+        shortcutEnv !== undefined &&
+        shortcutEnv !== "" &&
+        shortcutEnv.length < 16
+    ) {
+        throw new Error("SHORTCUT_KEY must be at least 16 characters.");
+    }
+    let shortcutKey: string;
+    let shortcutGenerated = false;
+    if (shortcutEnv) {
+        shortcutKey = shortcutEnv;
+    } else if (isSecret(keys.shortcut_key)) {
+        shortcutKey = keys.shortcut_key;
+    } else {
+        shortcutKey = newSecret(48);
+        keys.shortcut_key = shortcutKey;
+        shortcutGenerated = true;
+        dirty = true;
+    }
+    if (shortcutKey === mcpKey) {
+        throw new Error(
+            "SHORTCUT_KEY and the MCP key must be different secrets.",
+        );
+    }
+
     if (dirty) writeKeys(file, keys);
     return {
         mcpKey,
         mcpKeyFromEnv: Boolean(fromEnv),
         mcpKeyGenerated: generated,
+        shortcutKey,
+        shortcutKeyFromEnv: Boolean(shortcutEnv),
+        shortcutKeyGenerated: shortcutGenerated,
         exportSecret: keys.export_secret as string,
         file,
     };

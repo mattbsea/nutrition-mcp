@@ -8,6 +8,7 @@ import type {
     NutrientValues,
 } from "../meal-items.js";
 import type { NutrientSources, SourceDetail } from "../provenance.js";
+import type { HealthSyncField } from "../health-sync.js";
 
 // ---------- Core nutrition rows ----------
 
@@ -334,267 +335,64 @@ export type MealSnapshotGuard = Partial<
 
 // ---------- Apple Health sync ----------
 
-/** health_sync_pending without its hash columns. */
-export interface HealthSyncPendingRow {
-    id: string;
-    /** Which shortcut started the connect: the original Apple Health sync,
-     *  or the opt-in activity shortcut. Rows written before the column
-     *  existed read as "health" (the migration's default). */
-    kind: HealthSyncConnectKind;
-    fields: string[];
-    tz: string | null;
-    backfill_days: number;
-    /** Cleared once the claim code is minted. */
-    pkce_verifier: string | null;
-    /** Set, with claim_expires_at, once the browser finished sign-in. */
-    user_id: string | null;
-    claim_expires_at: string | null;
-    created_at: string;
-    expires_at: string;
-}
-
-/** health_sync_links without token_hash. */
-export interface HealthSyncLinkRow {
-    id: string;
-    user_id: string;
-    kind: "shortcut";
-    fields: string[];
-    fallback_tz: string | null;
-    /** YYYY-MM-DD: days on or after it are eligible. */
-    sync_start_date: string;
-    lease_until: string | null;
-    created_at: string;
-    last_used_at: string | null;
-    last_sync_at: string | null;
-    expires_at: string;
-}
-
-/** One health_sync_days row. */
+/** One local day's sync ledger: what Health already holds from us. */
 export interface HealthSyncDayRow {
-    user_id: string;
     /** YYYY-MM-DD, local to `timezone`. */
     date: string;
+    /** The zone the day was bucketed in when its first entry was acknowledged. */
     timezone: string;
-    /** null until the day's initial entry is acknowledged. */
-    sent_values: Record<string, number> | null;
-    topup_seq: number;
-    offer_count: number;
-    notified: Record<string, unknown>;
+    /** Entries acknowledged so far; the next entry id is rounds + 1. */
+    rounds: number;
+    /** "Sent so far" per field. A missing field has nothing sent. */
+    sent: Partial<Record<HealthSyncField, number>>;
     first_sent_at: string | null;
     last_sent_at: string | null;
 }
 
-/** The columns updateDay may write. */
-export type HealthSyncDayPatch = Partial<
-    Pick<
-        HealthSyncDayRow,
-        | "timezone"
-        | "sent_values"
-        | "topup_seq"
-        | "offer_count"
-        | "notified"
-        | "first_sent_at"
-        | "last_sent_at"
-    >
->;
-
-/** The state updateDay requires the row to still be in. */
-export interface HealthSyncDayExpect {
-    topup_seq: number;
-    /** Whether `sent_values` was null when the caller read the row. */
-    sentNull: boolean;
-}
-
-export type HealthSyncConnectKind = "health" | "activity";
-
-export interface NewPendingConnection {
-    kind: HealthSyncConnectKind;
-    connectId: string;
-    deviceSecret: string;
-    pkceVerifier: string;
-    fields: string[];
-    tz: string | null;
-    backfillDays: number;
-    expiresAt: string;
-}
-
-export interface NewLink {
-    fields: string[];
-    fallbackTz: string | null;
-    syncStartDate: string;
-    expiresAt: string;
-}
-
-export type HealthSyncLinkLookup =
-    | { status: "valid"; link: HealthSyncLinkRow }
-    | { status: "invalid" }
-    | { status: "unavailable" };
-
-/** What get_profile and the export show about a link. Never a token hash. */
-export interface HealthSyncLinkStatus {
-    kind: "shortcut";
-    fields: string[];
-    fallback_tz: string | null;
-    sync_start_date: string;
-    created_at: string;
-    last_used_at: string | null;
+/** The owner's single sync-state row. All times are ISO instants or null. */
+export interface HealthSyncStateRow {
+    lease_until: string | null;
+    /** Last GET /pending that was answered (the shortcut is alive). */
     last_sync_at: string | null;
-    expires_at: string;
-    /** Latest date whose initial entry was acknowledged, or null. */
-    sent_through: string | null;
+    /** Last acknowledged entry (values really reached Apple Health). */
+    last_ack_at: string | null;
+    /** Last POST /activity. */
+    last_activity_at: string | null;
 }
 
 export interface HealthSyncStore {
-    createPending(input: NewPendingConnection): Promise<void>;
-    /** An unexpired pending row, claimed or not; null when none. */
-    getPendingByConnectId(
-        connectId: string,
-        now?: Date,
-    ): Promise<HealthSyncPendingRow | null>;
-    /**
-     * Attach the signed-in user and a claim code to an unexpired, still
-     * unclaimed pending row, clearing its PKCE verifier. False when no such
-     * row (expired, unknown, or another callback claimed it first).
-     */
-    setPendingClaim(
-        connectId: string,
-        claimCode: string,
-        userId: string,
-        claimExpiresAt: string,
-        now?: Date,
-    ): Promise<boolean>;
-    /**
-     * Atomically delete and return the pending row matching BOTH the claim
-     * code and the device secret, if its claim is unexpired. Single-use.
-     */
-    consumeClaim(
-        claimCode: string,
-        deviceSecret: string,
-        now?: Date,
-    ): Promise<HealthSyncPendingRow | null>;
-    /** The user's link, replaced wholesale (one statement, keyed on user_id). */
-    replaceLink(userId: string, link: NewLink, token: string): Promise<void>;
-    lookupLink(token: string, now?: Date): Promise<HealthSyncLinkLookup>;
-    /** Stamp last_used_at and the slid expiry. The caller throttles. */
-    touchLink(
-        userId: string,
-        lastUsedAt: string,
-        expiresAt: string,
-    ): Promise<void>;
-    setLastSync(userId: string, at: string): Promise<void>;
     /**
      * Take the sync lease when it is free or lapsed, in one conditional
-     * update, so two concurrent syncs can't both win. True when taken.
+     * statement, so two concurrent runs can't both win. True when taken.
      */
     acquireLease(userId: string, until: string, now?: Date): Promise<boolean>;
     /** Free the lease; with `heldUntil`, only if it is still that lease. */
     releaseLease(userId: string, heldUntil?: string): Promise<void>;
-    /** Day rows with from <= date <= to (YYYY-MM-DD), by date. */
+    /** Stamp last_sync_at. */
+    touchSync(userId: string, at: string): Promise<void>;
+    /** Day rows with from <= date <= to, by date, each with its sent values. */
     getDays(
         userId: string,
         from: string,
         to: string,
     ): Promise<HealthSyncDayRow[]>;
     /**
-     * Insert day rows that do not exist yet; a (user, date) that already has
-     * a row is left exactly as it is. Returns the dates actually inserted.
+     * Write one day's row (and its sent values) only if the day still has
+     * exactly `expectedRounds` acknowledged rounds. False when another ack got
+     * there first: a replayed or overlapping ack never counts twice. Stamps
+     * last_ack_at on success.
      */
-    insertDays(rows: HealthSyncDayRow[]): Promise<string[]>;
-    /**
-     * Write `patch` to one day row only if it is still in the state the
-     * caller read: the same `topup_seq`, and `sent_values` still null or
-     * still set. False when the row moved on (or is gone) in between — an
-     * ack and a /pending of two runs never overwrite each other's work,
-     * since neither writes a whole row it read earlier.
-     */
-    updateDay(
+    commitDay(
         userId: string,
-        date: string,
-        patch: HealthSyncDayPatch,
-        expect: HealthSyncDayExpect,
-    ): Promise<boolean>;
-    /** Remove the user's link and every sent-values row. */
-    deleteLink(userId: string): Promise<void>;
-    /** The user's link while it still works — past its sliding expiry or its
-     *  365-day cap it is reported as none, exactly as lookupLink refuses it,
-     *  even before the hourly sweep deletes it. */
-    getLinkStatus(
-        userId: string,
-        now?: Date,
-    ): Promise<HealthSyncLinkStatus | null>;
-    getDaysForExport(userId: string): Promise<HealthSyncDayRow[]>;
-}
-
-export interface HealthSyncCleanupStore {
-    /**
-     * Pending rows whose connect window lapsed unclaimed, or whose claim code
-     * lapsed unredeemed. A claimed row lives by claim_expires_at alone, since
-     * a claim minted late in the 30 minutes may outlast expires_at.
-     */
-    deleteExpiredPending(nowIso: string): Promise<number>;
-    /** Links past their sliding expiry or created before `createdBeforeIso`. */
-    deleteExpiredLinks(
-        nowIso: string,
-        createdBeforeIso: string,
-    ): Promise<number>;
-    /** Sent-values rows dated strictly before `beforeDate` (YYYY-MM-DD). */
-    deleteDaysBefore(beforeDate: string): Promise<number>;
-    /** Activity links past their sliding expiry or created before
-     *  `createdBeforeIso` — the same two bounds as deleteExpiredLinks. */
-    deleteExpiredActivityLinks(
-        nowIso: string,
-        createdBeforeIso: string,
-    ): Promise<number>;
-}
-
-export interface HealthActivityLinkRow {
-    id: string;
-    user_id: string;
-    fallback_tz: string | null;
-    created_at: string;
-    last_used_at: string | null;
-    last_sync_at: string | null;
-    expires_at: string;
-}
-
-export type HealthActivityLinkLookup =
-    | { status: "valid"; link: HealthActivityLinkRow }
-    | { status: "invalid" }
-    | { status: "unavailable" };
-
-/** What get_profile and the export show about an activity link. */
-export type HealthActivityLinkStatus = Omit<
-    HealthActivityLinkRow,
-    "id" | "user_id"
->;
-
-export interface HealthActivityLinkStore {
-    /** The user's activity link, replaced wholesale (upsert on user_id). */
-    replaceActivityLink(
-        userId: string,
-        link: { fallbackTz: string | null; expiresAt: string },
-        token: string,
-    ): Promise<void>;
-    lookupActivityLink(
-        token: string,
-        now?: Date,
-    ): Promise<HealthActivityLinkLookup>;
-    /** Stamp last_used_at and the slid expiry. The caller throttles. */
-    touchActivityLink(
-        userId: string,
-        lastUsedAt: string,
-        expiresAt: string,
-    ): Promise<void>;
-    /** Stamp the last sync, and the phone's zone it reported. */
-    setActivitySynced(
-        userId: string,
+        expectedRounds: number,
+        row: HealthSyncDayRow,
         at: string,
-        fallbackTz: string | null,
-    ): Promise<void>;
-    deleteActivityLink(userId: string): Promise<void>;
-    /** The link while it still works (same bounds as the lookup), or null. */
-    getActivityLinkStatus(
-        userId: string,
-        now?: Date,
-    ): Promise<HealthActivityLinkStatus | null>;
+    ): Promise<boolean>;
+    getState(userId: string): Promise<HealthSyncStateRow>;
+    /** Stamp last_activity_at. */
+    setActivitySynced(userId: string, at: string): Promise<void>;
+    /** Delete this owner's day rows dated before `beforeDate`. */
+    deleteDaysBefore(userId: string, beforeDate: string): Promise<number>;
+    /** Forget everything sent and the state (start over). */
+    reset(userId: string): Promise<void>;
 }

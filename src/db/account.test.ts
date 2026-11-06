@@ -3,7 +3,6 @@ import { getDb } from "./conn.js";
 import { TABLES } from "./schema.js";
 import {
     createSavedMeal,
-    createSqliteHealthActivityLinkStore,
     createSqliteHealthSyncStore,
     deleteAllUserData,
     exportArchivePath,
@@ -78,50 +77,21 @@ async function populate(who: string) {
     await upsertProfile(who, { timezone: "UTC" });
     await upsertNutritionGoals(who, { daily_calories: 2000 });
     const hs = createSqliteHealthSyncStore();
-    await hs.replaceLink(
+    await hs.acquireLease(who, "2030-01-01T00:00:00.000Z");
+    await hs.commitDay(
         who,
+        0,
         {
-            fields: ["calories"],
-            fallbackTz: null,
-            syncStartDate: "2026-03-10",
-            expiresAt: "2030-01-01T00:00:00.000Z",
-        },
-        `tok-${who}`,
-    );
-    await hs.insertDays([
-        {
-            user_id: who,
             date: "2026-03-13",
             timezone: "UTC",
-            sent_values: null,
-            topup_seq: 0,
-            offer_count: 0,
-            notified: {},
-            first_sent_at: null,
-            last_sent_at: null,
+            rounds: 1,
+            sent: { energy_kcal: 100, protein_g: 5 },
+            first_sent_at: "2026-03-13T10:00:00.000Z",
+            last_sent_at: "2026-03-13T10:00:00.000Z",
         },
-    ]);
-    await hs.createPending({
-        kind: "health",
-        connectId: `c-${who}`,
-        deviceSecret: `d-${who}`,
-        pkceVerifier: "v",
-        fields: [],
-        tz: null,
-        backfillDays: 0,
-        expiresAt: "2030-01-01T00:00:00.000Z",
-    });
-    await hs.setPendingClaim(
-        `c-${who}`,
-        `claim-${who}`,
-        who,
-        "2030-01-01T00:00:00.000Z",
+        "2026-03-13T10:00:00.000Z",
     );
-    await createSqliteHealthActivityLinkStore().replaceActivityLink(
-        who,
-        { fallbackTz: null, expiresAt: "2030-01-01T00:00:00.000Z" },
-        `act-${who}`,
-    );
+    await hs.setActivitySynced(who, "2026-03-13T10:00:00.000Z");
 }
 
 describe("deleteAllUserData", () => {

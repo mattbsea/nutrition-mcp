@@ -181,6 +181,46 @@ export function mcpKeyGuard(getKey: () => string): MiddlewareHandler {
     };
 }
 
+/** `Authorization: Bearer <token>`: exactly that shape, one token, or null. */
+export function bearerToken(c: Context): string | null {
+    const header = c.req.header("authorization");
+    if (!header) return null;
+    const m = /^Bearer ([^\s]+)$/.exec(header.trim());
+    return m ? m[1]! : null;
+}
+
+/**
+ * Guards the Apple Health shortcut API: the key is accepted ONLY as an
+ * `Authorization: Bearer` header (never a URL or query string, so it stays out
+ * of proxy and access logs), compared in constant time, and counted against the
+ * same per-address failure ban as the MCP key. The caller supplies the two
+ * responses so each surface answers in its own envelope; neither says whether
+ * the key was missing, malformed or merely wrong.
+ */
+export function bearerKeyGuard(
+    getKey: () => string,
+    respond: {
+        unauthorized: (c: Context) => Response;
+        banned: (c: Context, retryAfterSeconds: number) => Response;
+    },
+): MiddlewareHandler {
+    return async (c, next) => {
+        const ip = getClientIp(c);
+        const ban = getBanState(ip);
+        if (ban.banned) {
+            c.set("suppressAccessLog", true);
+            return respond.banned(c, ban.retryAfterSeconds ?? 60);
+        }
+        const presented = bearerToken(c);
+        if (!presented || !keysMatch(presented, getKey())) {
+            recordAuthFailure(c);
+            return respond.unauthorized(c);
+        }
+        clearAuthFailures(ip);
+        await next();
+    };
+}
+
 // ---------- headers, logging ----------
 
 /** Security headers on every response. The CSP is the strictest that works for
