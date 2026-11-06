@@ -1,24 +1,164 @@
-import { describe, expect, test } from "bun:test";
-import { openDb } from "./migrate";
+import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { assertSingleOwner, openDb, runMigrations } from "./migrate";
+import { MIGRATIONS, SCHEMA_VERSION, TABLES } from "./schema";
+import { OWNER_ID } from "./owner";
 
-describe("SQLite schema", () => {
-  test("creates all 16 retained tables and enables foreign keys", () => {
-    const db = openDb(":memory:");
-    const count = db.query<{ n: number }, []>("SELECT count(*) AS n FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").get()!.n;
-    expect(count).toBe(16);
-    expect(db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()!.foreign_keys).toBe(1);
-    db.close();
-  });
-  test("migration is idempotent", () => {
-    const db = openDb(":memory:");
-    db.exec("PRAGMA user_version=0");
-    expect(() => openDbOnConnection(db)).not.toThrow();
-    db.close();
-  });
+const dirs: string[] = [];
+afterEach(() => {
+    while (dirs.length) rmSync(dirs.pop()!, { recursive: true, force: true });
 });
 
-function openDbOnConnection(db: ReturnType<typeof openDb>) {
-  // Re-applying the idempotent schema is the migration's repeatability contract.
-  db.exec("BEGIN;" );
-  try { db.exec("SELECT 1;"); db.exec("COMMIT;"); } catch (e) { db.exec("ROLLBACK;"); throw e; }
-}
+const tableNames = (db: Database) =>
+    db
+        .query<{ name: string }, []>(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .all()
+        .map((r) => r.name);
+
+describe("schema", () => {
+    test("creates exactly the 16 retained tables", () => {
+        const db = openDb(":memory:");
+        expect(tableNames(db)).toEqual([...TABLES].sort());
+        expect(TABLES.length).toBe(16);
+        db.close();
+    });
+
+    test("no table of the cloud-only features exists", () => {
+        const db = openDb(":memory:");
+        const names = tableNames(db);
+        for (const dropped of [
+            "oauth_tokens",
+            "refresh_tokens",
+            "auth_codes",
+            "registered_clients",
+            "oauth_clients",
+            "patreon_tokens",
+            "tool_analytics",
+        ])
+            expect(names).not.toContain(dropped);
+        db.close();
+    });
+
+    test("foreign keys are enforced and user_version is current", () => {
+        const db = openDb(":memory:");
+        expect(
+            db.query<{ foreign_keys: number }, []>("PRAGMA foreign_keys").get()!
+                .foreign_keys,
+        ).toBe(1);
+        expect(
+            db.query<{ user_version: number }, []>("PRAGMA user_version").get()!
+                .user_version,
+        ).toBe(SCHEMA_VERSION);
+        db.close();
+    });
+
+    test("the partial unique idempotency indexes exist for the five logs", () => {
+        const db = openDb(":memory:");
+        const idx = db
+            .query<{ name: string; sql: string }, []>(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND name LIKE 'uniq_%idem'",
+            )
+            .all();
+        expect(idx.map((i) => i.name).sort()).toEqual([
+            "uniq_active_calories_log_user_idem",
+            "uniq_body_measurement_log_user_idem",
+            "uniq_meals_user_idem",
+            "uniq_water_log_user_idem",
+            "uniq_weight_log_user_idem",
+        ]);
+        for (const i of idx) expect(i.sql).toContain("WHERE idempotency_key IS NOT NULL");
+        db.close();
+    });
+
+    test("integer columns reject fractional values, like Postgres", () => {
+        const db = openDb(":memory:");
+        expect(() =>
+            db
+                .query("INSERT INTO meals (user_id, description, calories) VALUES (?, 'x', 10.5)")
+                .run(OWNER_ID),
+        ).toThrow();
+        db.query("INSERT INTO meals (user_id, description, calories) VALUES (?, 'x', 10)").run(OWNER_ID);
+        db.close();
+    });
+});
+
+describe("migrations", () => {
+    test("running them again on a migrated database changes nothing", () => {
+        const db = openDb(":memory:");
+        db.query("INSERT INTO water_log (user_id, amount_ml) VALUES (?, 250)").run(OWNER_ID);
+        expect(runMigrations(db)).toBe(SCHEMA_VERSION);
+        expect(runMigrations(db)).toBe(SCHEMA_VERSION);
+        expect(db.query<{ n: number }, []>("SELECT count(*) n FROM water_log").get()!.n).toBe(1);
+        db.close();
+    });
+
+    test("a file database persists across reopen and is not re-created", () => {
+        const dir = mkdtempSync(join(tmpdir(), "nutdb-"));
+        dirs.push(dir);
+        const path = join(dir, "sub", "nutrition.db");
+        const a = openDb(path);
+        a.query("INSERT INTO water_log (user_id, amount_ml) VALUES (?, 500)").run(OWNER_ID);
+        expect(a.query<{ journal_mode: string }, []>("PRAGMA journal_mode").get()!.journal_mode).toBe("wal");
+        a.close();
+        const b = openDb(path);
+        expect(b.query<{ amount_ml: number }, []>("SELECT amount_ml FROM water_log").get()!.amount_ml).toBe(500);
+        b.close();
+    });
+
+    test("DATA_DIR selects the default path", () => {
+        const dir = mkdtempSync(join(tmpdir(), "nutdb-"));
+        dirs.push(dir);
+        const prev = process.env.DATA_DIR;
+        process.env.DATA_DIR = dir;
+        try {
+            const db = openDb();
+            db.close();
+            expect(Bun.file(join(dir, "nutrition.db")).size).toBeGreaterThan(0);
+        } finally {
+            if (prev === undefined) delete process.env.DATA_DIR;
+            else process.env.DATA_DIR = prev;
+        }
+    });
+
+    test("a database from a newer build is refused", () => {
+        const db = new Database(":memory:");
+        db.exec(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+        expect(() => runMigrations(db)).toThrow(/newer than this build/);
+        db.close();
+    });
+
+    test("a failing migration rolls back completely and keeps the version", () => {
+        const db = new Database(":memory:");
+        const bad = { version: 1, name: "bad", sql: "CREATE TABLE ok (a); CREATE TABLE ok (b);" };
+        const real = MIGRATIONS.slice();
+        (MIGRATIONS as unknown as unknown[]).splice(0, MIGRATIONS.length, bad);
+        try {
+            expect(() => runMigrations(db)).toThrow();
+        } finally {
+            (MIGRATIONS as unknown as unknown[]).splice(0, MIGRATIONS.length, ...real);
+        }
+        expect(tableNames(db)).toEqual([]);
+        expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(0);
+        db.close();
+    });
+
+    test("MIGRATIONS versions are strictly increasing from 1", () => {
+        MIGRATIONS.forEach((m, i) => expect(m.version).toBe(i + 1));
+    });
+});
+
+describe("owner audit", () => {
+    test("passes with only the local owner and fails on a stray owner id", () => {
+        const db = openDb(":memory:");
+        db.query("INSERT INTO water_log (user_id, amount_ml) VALUES (?, 250)").run(OWNER_ID);
+        expect(() => assertSingleOwner(db)).not.toThrow();
+        db.query("INSERT INTO water_log (user_id, amount_ml) VALUES ('someone-else', 250)").run();
+        expect(() => assertSingleOwner(db)).toThrow(/other than the single local owner/);
+        db.close();
+    });
+});
