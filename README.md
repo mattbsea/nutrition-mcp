@@ -47,10 +47,25 @@ There is exactly one user and one credential per surface:
   per-address failure ban. The shortcut build guide, the hourly design and a
   test checklist are in [docs/apple-health-shortcuts.md](docs/apple-health-shortcuts.md);
   `scripts/health-sync-curl.sh` exercises every route without a phone.
+- **Dashboard:** `/` is a login page, then a server-rendered, mobile-first
+  dashboard: Today (calories, macros, water, weight, active calories against
+  goals, meals), Trends (7/30/90-day inline-SVG charts), Meals (by date, search,
+  detail), Apple Health (last sync, logged vs sent, discrepancies) and Settings
+  (goals, units, the connector URL with the key hidden until the password is
+  entered again). One password: `DASHBOARD_PASSWORD` (12+ characters), or one is
+  generated once into `DATA_DIR/keys.json` as `dashboard_password`. It is
+  hashed with argon2id in memory; the session is a signed HttpOnly,
+  `SameSite=Lax` cookie (`Secure` behind an https proxy) backed by a session
+  table (30 days, sliding, revocable: Sign out, Sign out everywhere), every form
+  carries a CSRF token, and wrong passwords back off per address (30 s doubling
+  to 15 min) with a global budget. No script, style or font comes from anywhere
+  but this server (CSP `default-src 'none'`, no inline code, no CDN).
 - **Export download:** `export_all_data` writes the ZIP under
   `DATA_DIR/exports` and returns `/exports/download?exp=…&sig=…`, an
   HMAC-signed link valid for 60 minutes. Archives older than that are deleted
-  at startup and hourly; `delete_account` removes them too.
+  at startup and hourly; `delete_account` removes them too. The dashboard's
+  Settings page also links the current archive (`/exports/nutrition-mcp-export.zip`),
+  which needs the login cookie or a valid signature; no other file name is ever served.
 
 ## Configuration
 
@@ -60,6 +75,7 @@ See [.env.example](.env.example). The ones that matter:
 | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `DATA_DIR`                       | Where everything lives (`nutrition.db`, `keys.json`, `exports/`). Default `./data`, `/data` in the container.                                                                                                                                                   |
 | `MCP_KEY`                        | The MCP path key (≥ 32 chars, letters, digits, `-`, `_`). Generated and persisted when unset.                                                                                                                                                                   |
+| `DASHBOARD_PASSWORD`             | The dashboard login password (12+ characters). Generated and saved to `keys.json` when unset.                                                                                                                                                                   |
 | `TRUST_PROXY`                    | `1` behind a reverse proxy you control: failure counting uses the rightmost `X-Forwarded-For` entry and `X-Forwarded-Host`/`-Proto` build the advertised URLs (HSTS, icons). Otherwise those headers are ignored. `PUBLIC_URL` overrides the advertised origin. |
 | `PUBLIC_URL`                     | Public origin, used to build the export link the tool returns.                                                                                                                                                                                                  |
 | `USDA_API_KEY`, `OFF_USER_AGENT` | Food lookups. Open Food Facts requires a User-Agent with a contact.                                                                                                                                                                                             |
