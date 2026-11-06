@@ -6,7 +6,7 @@ upstream copyright notice in LICENSE.
 ## Map
 
 - `src/index.ts` — HTTP app (`createApp`): access log, secure headers, body
-  limit, shutdown gate, `/mcp/:key`, `/exports/download`, 501 health-sync stub,
+  limit, shutdown gate, `/mcp/:key`, `/exports/download`, the health-sync router,
   generic 404. Boot only runs when it is the entrypoint.
 - `src/perimeter.ts` — client IP (`TRUST_PROXY`), key guard, ban, log redaction.
 - `src/keys.ts` — `DATA_DIR/keys.json` (mcp key, export secret).
@@ -15,8 +15,9 @@ upstream copyright notice in LICENSE.
 - `src/db/` — the SQLite layer: `schema.ts` (append-only `MIGRATIONS`),
   `migrate.ts` (`openDb`), `repo.ts` (everything callers import), per-area files.
 - `src/export.ts`, `src/export-files.ts` — ZIP build, files, signed links.
-- `src/health-sync*.ts` — Apple Health shortcut logic; the routes file is kept
-  but NOT mounted until step B swaps its link-token auth for a shortcut key.
+- `src/health-sync.ts` (pure hourly model), `health-sync-status.ts` (plan + dashboard
+  status), `health-sync-routes.ts` (bearer-key API), `db/health-store.ts` (ledger).
+  See docs/apple-health-shortcuts.md.
 - `public/widgets/` — the in-chat MCP widgets.
 
 ## Rules

@@ -40,6 +40,13 @@ There is exactly one user and one credential per surface:
       escalating `Retry-After`.
     - The key never appears in logs (the access log prints `/mcp/[redacted]`,
       and every console line is scrubbed as a backstop) or in any response.
+- **Apple Health shortcuts:** `Authorization: Bearer <shortcut key>` on
+  `/api/v1/health-sync/*`. A separate secret from the MCP key (`SHORTCUT_KEY`, or
+  generated once into `DATA_DIR/keys.json` as `shortcut_key`), compared in
+  constant time, never accepted in a URL, with a generic 401 and the same
+  per-address failure ban. The shortcut build guide, the hourly design and a
+  test checklist are in [docs/apple-health-shortcuts.md](docs/apple-health-shortcuts.md);
+  `scripts/health-sync-curl.sh` exercises every route without a phone.
 - **Export download:** `export_all_data` writes the ZIP under
   `DATA_DIR/exports` and returns `/exports/download?exp=…&sig=…`, an
   HMAC-signed link valid for 60 minutes. Archives older than that are deleted
