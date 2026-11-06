@@ -21,9 +21,11 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Context, MiddlewareHandler } from "hono";
 import {
+    checkRateLimit,
     clearAuthFailures,
     getBanState,
     noteAuthFailure,
+    noteGlobalFailure,
 } from "./rate-limit.js";
 import { isHttpsRequest } from "./url.js";
 import { maskIp } from "./net.js";
@@ -34,6 +36,8 @@ export interface ServerEnv {
 }
 
 export const REDACTED = "[redacted]";
+/** The one principal, as the key of the per-owner request window. */
+const OWNER_KEY = "local-owner";
 export const MCP_PATH_PREFIX = "/mcp/";
 
 declare module "hono" {
@@ -52,12 +56,57 @@ export function trustProxy(
     return env.TRUST_PROXY === "1";
 }
 
+const IPV4 = /^\d{1,3}(?:\.\d{1,3}){3}$/;
+const HEXTET = /^[0-9a-f]{1,4}$/i;
+
+/**
+ * The key failures are counted under. IPv4 is itself. IPv6 is reduced to its
+ * /64 prefix, because one subscriber routinely controls the whole /64 (2^64
+ * addresses) and per-address counting would hand them unlimited fresh buckets;
+ * an IPv4-mapped address counts as the IPv4 it wraps. Anything that is not an IP
+ * (a forged header value) is the single key "invalid", so garbage cannot mint
+ * keys either.
+ */
+export function normaliseAddress(raw: string): string {
+    const a = raw
+        .trim()
+        .replace(/^\[|\]$/g, "")
+        .replace(/%.*$/, "");
+    if (IPV4.test(a)) {
+        return a.split(".").every((o) => Number(o) <= 255) ? a : "invalid";
+    }
+    if (!a.includes(":")) return "invalid";
+    const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(a);
+    if (mapped) return normaliseAddress(mapped[1]!);
+    const split = a.split("::");
+    if (split.length > 2) return "invalid";
+    const parts = (t: string) => (t === "" ? [] : t.split(":"));
+    const head = parts(split[0]!);
+    const tail = split.length === 2 ? parts(split[1]!) : [];
+    let groups: string[];
+    if (split.length === 2) {
+        const fill = 8 - head.length - tail.length;
+        if (fill < 1) return "invalid";
+        groups = [...head, ...new Array<string>(fill).fill("0"), ...tail];
+    } else {
+        groups = head;
+    }
+    if (groups.length !== 8 || !groups.every((g) => HEXTET.test(g))) {
+        return "invalid";
+    }
+    return `${groups
+        .slice(0, 4)
+        .map((g) => g.toLowerCase().replace(/^0+(?=.)/, ""))
+        .join(":")}::/64`;
+}
+
 /**
  * The client address used to key failure counting. With TRUST_PROXY=1 it is
  * the RIGHTMOST X-Forwarded-For entry: the one our own proxy appended (the
  * address it saw), since everything to its left is supplied by the client and
  * freely forgeable. Otherwise it is the socket peer, and the header is
- * ignored entirely. "unknown" only when neither is available.
+ * ignored entirely. Always passed through normaliseAddress (IPv6 → /64);
+ * "unknown" only when neither is available.
  */
 export function getClientIp(c: Context): string {
     if (trustProxy()) {
@@ -68,10 +117,11 @@ export function getClientIp(c: Context): string {
                 .map((p) => p.trim())
                 .filter(Boolean);
             const last = parts[parts.length - 1];
-            if (last) return last;
+            if (last) return normaliseAddress(last);
         }
     }
-    return (c.env as ServerEnv | undefined)?.ip || "unknown";
+    const peer = (c.env as ServerEnv | undefined)?.ip;
+    return peer ? normaliseAddress(peer) : "unknown";
 }
 
 /** Count one failed authentication against the client IP and log a ban once. */
@@ -174,9 +224,23 @@ export function mcpKeyGuard(getKey: () => string): MiddlewareHandler {
         const presented = c.req.param("key") ?? "";
         if (!presented || !keysMatch(presented, getKey())) {
             recordAuthFailure(c);
+            // Global budget: a flood of wrong keys, from however many forged
+            // addresses, is shed for everyone (a correct key never is).
+            const flood = noteGlobalFailure();
+            if (flood.throttled) {
+                c.header("Retry-After", String(flood.retryAfterSeconds));
+                return c.json({ error: "rate_limited" }, 429);
+            }
             return notFound(c);
         }
         clearAuthFailures(ip);
+        // Per-owner request budget (generous): a looping client must not be
+        // able to hammer the database and the food APIs.
+        const budget = checkRateLimit(OWNER_KEY);
+        if (!budget.allowed) {
+            c.header("Retry-After", String(budget.retryAfterSeconds ?? 60));
+            return c.json({ error: "rate_limited" }, 429);
+        }
         await next();
     };
 }
@@ -214,6 +278,10 @@ export function bearerKeyGuard(
         const presented = bearerToken(c);
         if (!presented || !keysMatch(presented, getKey())) {
             recordAuthFailure(c);
+            const flood = noteGlobalFailure();
+            if (flood.throttled) {
+                return respond.banned(c, flood.retryAfterSeconds);
+            }
             return respond.unauthorized(c);
         }
         clearAuthFailures(ip);

@@ -6,10 +6,18 @@ import { createApp, setShuttingDownForTest } from "./index.js";
 import {
     installLogRedaction,
     keysMatch,
+    normaliseAddress,
     redactPath,
     redactText,
 } from "./perimeter.js";
-import { _resetBuckets, getBanState } from "./rate-limit.js";
+import {
+    GLOBAL_FAILURE_BUDGET_PER_MIN,
+    MCP_LIMIT_PER_WINDOW,
+    MAX_TRACKED_CLIENTS,
+    _resetBuckets,
+    _trackedClientCount,
+    getBanState,
+} from "./rate-limit.js";
 import { OWNER_ID, exportArchivePath, insertWater } from "./db/repo.js";
 import { useMemoryDb } from "./db/test-helpers.js";
 import { signExportLink, writeExportArchive } from "./export-files.js";
@@ -208,6 +216,165 @@ describe("the MCP key", () => {
         current = "new-" + KEY;
         expect((await go(KEY)).status).toBe(404);
         expect((await go(current)).status).toBe(200);
+    });
+});
+
+describe("forged addresses cannot beat the failure limits", () => {
+    const forged = (i: number) => `1.2.3.4, 203.0.${(i >> 8) & 255}.${i & 255}`;
+    const withForged = (i: number, key: string) =>
+        call(`/mcp/${key}`, {
+            method: "POST",
+            headers: { "x-forwarded-for": forged(i) },
+        });
+
+    test("60 wrong keys from 60 DIFFERENT forwarded addresses are throttled by the global budget", async () => {
+        process.env.TRUST_PROXY = "1";
+        const statuses: number[] = [];
+        for (let i = 0; i < 60; i++) {
+            statuses.push((await withForged(i, "wrong" + i)).status);
+        }
+        // No single address ever reached its own ban...
+        expect(getBanState("203.0.0.0").banned).toBe(false);
+        // ...but the Nth wrong key and everything after it is shed for everyone.
+        expect(
+            statuses
+                .slice(0, GLOBAL_FAILURE_BUDGET_PER_MIN - 1)
+                .every((s) => s === 404),
+        ).toBe(true);
+        expect(
+            statuses
+                .slice(GLOBAL_FAILURE_BUDGET_PER_MIN)
+                .every((s) => s === 429),
+        ).toBe(true);
+        const shed = await withForged(999, "another-wrong");
+        expect(shed.status).toBe(429);
+        expect(Number(shed.headers.get("retry-after"))).toBeGreaterThan(0);
+        expect(await shed.json()).toEqual({ error: "rate_limited" });
+    });
+
+    test("the right key keeps working while wrong keys are being shed", async () => {
+        process.env.TRUST_PROXY = "1";
+        for (let i = 0; i < 60; i++) await withForged(i, "wrong" + i);
+        const ok = await call(`/mcp/${KEY}`, {
+            method: "GET",
+            headers: { "x-forwarded-for": forged(5000) },
+        });
+        expect(ok.status).toBe(405); // past the key check, then "POST only"
+    });
+
+    test("the Apple Health API shares the budget: forged addresses cannot guess its key either", async () => {
+        process.env.TRUST_PROXY = "1";
+        const codes: number[] = [];
+        for (let i = 0; i < 40; i++) {
+            const r = await call("/api/v1/health-sync/pending", {
+                headers: {
+                    authorization: `Bearer guess${i}`,
+                    "x-forwarded-for": forged(i),
+                },
+            });
+            codes.push(r.status);
+        }
+        expect(
+            codes
+                .slice(0, GLOBAL_FAILURE_BUDGET_PER_MIN - 1)
+                .every((c) => c === 401),
+        ).toBe(true);
+        expect(
+            codes.slice(GLOBAL_FAILURE_BUDGET_PER_MIN).every((c) => c === 429),
+        ).toBe(true);
+        const good = await call("/api/v1/health-sync/status", {
+            headers: {
+                authorization: `Bearer ${SKEY}`,
+                "x-forwarded-for": forged(7000),
+            },
+        });
+        expect(good.status).toBe(200);
+    });
+
+    test("without TRUST_PROXY the forged header is ignored and one peer is counted as one", async () => {
+        for (let i = 0; i < 20; i++) await withForged(i, "wrong" + i);
+        expect(getBanState(IP).banned).toBe(true);
+    });
+
+    test("an IPv6 /64 is ONE client: 20 failures from 20 addresses inside it earn the ban", async () => {
+        process.env.TRUST_PROXY = "1";
+        for (let i = 0; i < 20; i++) {
+            await call(`/mcp/bad${i}`, {
+                method: "POST",
+                headers: {
+                    "x-forwarded-for": `2001:db8:abcd:12:${i.toString(16)}:${i}::${i + 1}`,
+                },
+            });
+        }
+        expect(getBanState("2001:db8:abcd:12::/64").banned).toBe(true);
+        // another /64 is unaffected
+        expect(getBanState("2001:db8:abcd:13::/64").banned).toBe(false);
+        const shed = await call(`/mcp/${KEY}`, {
+            method: "POST",
+            headers: {
+                "x-forwarded-for": "2001:db8:abcd:12:ffff:ffff:ffff:ffff",
+            },
+        });
+        expect(shed.status).toBe(429);
+    });
+
+    test("garbage forwarded values all map to one key and cannot mint trackers", async () => {
+        process.env.TRUST_PROXY = "1";
+        const before = _trackedClientCount();
+        for (let i = 0; i < 25; i++) {
+            await call(`/mcp/bad${i}`, {
+                method: "POST",
+                headers: { "x-forwarded-for": `not-an-address-${i}` },
+            });
+        }
+        expect(_trackedClientCount()).toBeLessThanOrEqual(before + 1);
+    });
+
+    test("memory stays bounded however many distinct addresses fail (burst across minutes)", async () => {
+        process.env.TRUST_PROXY = "1";
+        const { noteAuthFailure } = await import("./rate-limit.js");
+        for (let i = 0; i < MAX_TRACKED_CLIENTS * 2; i++) {
+            noteAuthFailure(
+                `2001:db8:${(i >> 16).toString(16)}:${(i & 0xffff).toString(16)}::/64`,
+            );
+        }
+        expect(_trackedClientCount()).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+    });
+});
+
+describe("normaliseAddress", () => {
+    test.each([
+        ["198.51.100.7", "198.51.100.7"],
+        ["300.1.1.1", "invalid"],
+        ["2001:db8:abcd:12::1", "2001:db8:abcd:12::/64"],
+        ["2001:0DB8:ABCD:0012:0000:0000:0000:0001", "2001:db8:abcd:12::/64"],
+        ["[2001:db8::1]", "2001:db8:0:0::/64"],
+        ["fe80::1%eth0", "fe80:0:0:0::/64"],
+        ["::1", "0:0:0:0::/64"],
+        ["::ffff:198.51.100.7", "198.51.100.7"],
+        ["not-an-ip", "invalid"],
+        ["1:2:3:4:5:6:7:8:9", "invalid"],
+        ["1::2::3", "invalid"],
+        ["2001:db8:xyz::1", "invalid"],
+        ["", "invalid"],
+    ])("%s -> %s", (raw, want) => {
+        expect(normaliseAddress(raw)).toBe(want);
+    });
+});
+
+describe("the per-owner request budget", () => {
+    test(`${MCP_LIMIT_PER_WINDOW} requests a minute with the right key, then 429; wrong keys do not spend it`, async () => {
+        for (let i = 0; i < 5; i++)
+            await call(`/mcp/wrong${i}`, { method: "GET" });
+        for (let i = 0; i < MCP_LIMIT_PER_WINDOW; i++) {
+            const r = await call(`/mcp/${KEY}`, { method: "GET" });
+            if (r.status !== 405)
+                throw new Error(`request ${i} was ${r.status}`);
+        }
+        const over = await call(`/mcp/${KEY}`, { method: "GET" });
+        expect(over.status).toBe(429);
+        expect(Number(over.headers.get("retry-after"))).toBeGreaterThan(0);
+        expect(await over.json()).toEqual({ error: "rate_limited" });
     });
 });
 

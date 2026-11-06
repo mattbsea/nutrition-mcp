@@ -2,6 +2,12 @@ import { test, expect, beforeEach, afterEach, setSystemTime } from "bun:test";
 import {
     checkRateLimit,
     noteAuthFailure,
+    noteGlobalFailure,
+    globalFailureThrottle,
+    GLOBAL_FAILURE_BUDGET_PER_MIN,
+    MAX_TRACKED_CLIENTS,
+    _sweepNow,
+    _trackedClientCount,
     clearAuthFailures,
     getBanState,
     _resetBuckets,
@@ -203,13 +209,13 @@ test("unknown IPs report no ban", () => {
 
 // --- Regression coverage for the pre-existing sliding windows ---
 
-test("checkRateLimit allows 60 requests per user per minute, then blocks", () => {
+test("checkRateLimit allows 600 requests per owner per minute, then blocks", () => {
     const user = "user-abc";
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 600; i++) {
         const result = checkRateLimit(user);
         expect(result.allowed).toBe(true);
-        expect(result.limit).toBe(60);
-        expect(result.remaining).toBe(59 - i);
+        expect(result.limit).toBe(600);
+        expect(result.remaining).toBe(599 - i);
     }
 
     const blocked = checkRateLimit(user);
@@ -224,7 +230,7 @@ test("checkRateLimit allows 60 requests per user per minute, then blocks", () =>
 
 test("_resetBuckets clears rate-limit windows and ban state together", () => {
     const ip = "203.0.113.50";
-    for (let i = 0; i < 60; i++) checkRateLimit(ip);
+    for (let i = 0; i < 600; i++) checkRateLimit(ip);
     expect(checkRateLimit(ip).allowed).toBe(false);
     expect(fail(ip, 20).banned).toBe(true);
 
@@ -232,4 +238,55 @@ test("_resetBuckets clears rate-limit windows and ban state together", () => {
 
     expect(checkRateLimit(ip).allowed).toBe(true);
     expect(getBanState(ip).banned).toBe(false);
+});
+
+// ---------- bounded memory and the global failure budget ----------
+
+test("the failure map is bounded: a flood of distinct addresses never grows it past the cap", () => {
+    for (let i = 0; i < MAX_TRACKED_CLIENTS * 3; i++) {
+        noteAuthFailure(
+            `2001:db8:${(i >> 16).toString(16)}:${(i & 0xffff).toString(16)}::/64`,
+        );
+    }
+    expect(_trackedClientCount()).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+    expect(_trackedClientCount()).toBe(MAX_TRACKED_CLIENTS);
+});
+
+test("eviction spares an address that is serving a ban", () => {
+    const attacker = "203.0.113.200";
+    expect(fail(attacker, 20).banned).toBe(true);
+    for (let i = 0; i < MAX_TRACKED_CLIENTS * 2; i++)
+        noteAuthFailure(`198.51.${i >> 8}.${i & 255}x${i}`);
+    expect(_trackedClientCount()).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+    expect(getBanState(attacker).banned).toBe(true);
+});
+
+test("an entry that never reached a ban is forgotten after 15 minutes; one that earned a ban is kept longer", () => {
+    noteAuthFailure("203.0.113.1"); // one stray failure
+    fail("203.0.113.2", 20); // earned a ban (escalation 1)
+    advance(14 * 60_000);
+    _sweepNow();
+    expect(_trackedClientCount()).toBe(2);
+    advance(2 * 60_000); // 16 min since the stray failure
+    _sweepNow();
+    expect(_trackedClientCount()).toBe(1);
+    advance(6 * 60 * 60_000);
+    _sweepNow();
+    expect(_trackedClientCount()).toBe(0);
+});
+
+test("the global budget sheds wrong-key requests after N per minute and recovers as the window slides", () => {
+    for (let i = 0; i < GLOBAL_FAILURE_BUDGET_PER_MIN - 1; i++) {
+        expect(noteGlobalFailure().throttled).toBe(false);
+    }
+    // the Nth failure fills the budget: it and everything after is shed
+    const last = noteGlobalFailure();
+    expect(last.throttled).toBe(true);
+    expect(last.retryAfterSeconds).toBeGreaterThan(0);
+    expect(globalFailureThrottle().throttled).toBe(true);
+    // over budget nothing more is stored: the bound is the budget
+    for (let i = 0; i < 1000; i++) noteGlobalFailure();
+    advance(60_001);
+    expect(globalFailureThrottle().throttled).toBe(false);
+    expect(noteGlobalFailure().throttled).toBe(false);
 });
