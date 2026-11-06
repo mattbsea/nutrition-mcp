@@ -505,7 +505,10 @@ describe("the rest of the surface", () => {
         const mcp = await mcpPost("totally-wrong");
         expect(mcp.status).toBe(503);
         expect(mcp.headers.get("retry-after")).toBe("1");
-        expect(((await mcp.json()) as { error: { message: string } }).error.message).toContain("shutting down");
+        expect(
+            ((await mcp.json()) as { error: { message: string } }).error
+                .message,
+        ).toContain("shutting down");
         const other = await call("/health");
         expect(other.status).toBe(503);
         expect(await other.json()).toEqual({ error: "shutting_down" });

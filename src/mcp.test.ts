@@ -7252,7 +7252,7 @@ describe("tool text makes only claims the code keeps", () => {
                 // for another connector (policy 2.C).
                 expect(
                     byName.get("get_current_time")!.description ?? "",
-                ).toContain("nutrition tracker");
+                ).toContain("nutrition log");
                 const del = byName.get("delete_account")!;
                 expect(del.title).toBe("Delete Nutrition Account");
                 expect(del.annotations?.title).toBe("Delete Nutrition Account");

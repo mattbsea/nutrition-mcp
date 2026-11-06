@@ -163,8 +163,7 @@ export function categorizeError(error: unknown): string {
     // checked *before* tier 3's auth/rate/date keywords below: our own nouns
     // ("Failed to store token", "Failed to delete auth codes") would
     // otherwise false-positive on tier 3's "token"/"auth" check.
-    if (msg.includes("failed to ") || msg.includes("sqlite"))
-        return "db_error";
+    if (msg.includes("failed to ") || msg.includes("sqlite")) return "db_error";
 
     // ---- Tier 3: keyword heuristics for third-party error text ----
 
@@ -322,9 +321,7 @@ export async function runTool<T>(
             durationMs,
         });
         if (outcome.success) {
-            console.log(
-                toolLogLine(toolName, durationMs, { kind: "success" }),
-            );
+            console.log(toolLogLine(toolName, durationMs, { kind: "success" }));
         } else {
             console.warn(
                 toolLogLine(toolName, durationMs, {

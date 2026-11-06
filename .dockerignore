@@ -2,9 +2,10 @@ node_modules
 .env
 .env.*
 .git
+.github
 .gitignore
 .idea
 .DS_Store
-supabase
+data
 *.md
 LICENSE

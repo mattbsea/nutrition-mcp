@@ -3067,18 +3067,18 @@ function disclosureFixture() {
         });
         const tag = fakeTag();
         const reveal = fakeReveal();
-        const ingTag = fakeTag();
+        const ingredientTag = fakeTag();
         const ingReveal = fakeReveal();
         const items = new FakeNode("ul", {
             class: "md-items",
             "aria-live": "off",
         });
         items.hidden = true;
-        items.add(new FakeNode("li").add(ingTag, ingReveal));
+        items.add(new FakeNode("li").add(ingredientTag, ingReveal));
         const li = new FakeNode("li", { class: `md-row has-items ${name}` });
         li.add(btn, tag, reveal, items);
         list.add(li);
-        return { btn, tag, reveal, ingTag, ingReveal, items, li };
+        return { btn, tag, reveal, ingredientTag, ingReveal, items, li };
     };
     return { root, a: row("a"), b: row("b") };
 }
@@ -3110,7 +3110,7 @@ test("an ingredient reveal stays inside its open row, which is its context", () 
     // open with it. Nothing else opens alongside.
     const f = disclosureFixture();
     macrosApi.mealRowToggle(f.a.btn);
-    macrosApi.sourceToggle(f.a.ingTag);
+    macrosApi.sourceToggle(f.a.ingredientTag);
     expect(f.a.btn.getAttribute("aria-expanded")).toBe("true");
     expect(f.a.items.hidden).toBe(false);
     expect(f.a.ingReveal.hidden).toBe(false);
@@ -3121,7 +3121,7 @@ test("an ingredient reveal stays inside its open row, which is its context", () 
 test("opening a reveal on another row closes the open row and its reveals", () => {
     const f = disclosureFixture();
     macrosApi.mealRowToggle(f.a.btn);
-    macrosApi.sourceToggle(f.a.ingTag);
+    macrosApi.sourceToggle(f.a.ingredientTag);
     macrosApi.sourceToggle(f.b.tag);
     expect(f.a.btn.getAttribute("aria-expanded")).toBe("false");
     expect(f.a.items.hidden).toBe(true);

@@ -90,12 +90,17 @@ export function recordAuthFailure(c: Context): void {
 
 /** `/mcp/<anything>` becomes `/mcp/[redacted]`; other paths are unchanged. */
 export function redactPath(path: string): string {
-    return path.startsWith(MCP_PATH_PREFIX) ? `${MCP_PATH_PREFIX}${REDACTED}` : path;
+    return path.startsWith(MCP_PATH_PREFIX)
+        ? `${MCP_PATH_PREFIX}${REDACTED}`
+        : path;
 }
 
 /** Scrubs a string: every known secret and any `/mcp/<segment>` path. */
 export function redactText(text: string, secrets: readonly string[]): string {
-    let out = text.replace(/\/mcp\/[^\s"'?#\\/]+/g, `${MCP_PATH_PREFIX}${REDACTED}`);
+    let out = text.replace(
+        /\/mcp\/[^\s"'?#\\/]+/g,
+        `${MCP_PATH_PREFIX}${REDACTED}`,
+    );
     for (const secret of secrets) {
         if (secret.length >= 8) out = out.split(secret).join(REDACTED);
     }
@@ -108,7 +113,9 @@ export function redactText(text: string, secrets: readonly string[]): string {
  * message that quotes a request). `secrets` is read at call time. Returns an
  * uninstall function.
  */
-export function installLogRedaction(secrets: () => readonly string[]): () => void {
+export function installLogRedaction(
+    secrets: () => readonly string[],
+): () => void {
     const methods = ["log", "info", "warn", "error", "debug"] as const;
     const originals = methods.map((m) => console[m]);
     const scrub = (arg: unknown): unknown => {
@@ -123,7 +130,8 @@ export function installLogRedaction(secrets: () => readonly string[]): () => voi
     };
     methods.forEach((m, i) => {
         const original = originals[i]!;
-        console[m] = (...args: unknown[]) => original.apply(console, args.map(scrub));
+        console[m] = (...args: unknown[]) =>
+            original.apply(console, args.map(scrub));
     });
     return () => {
         methods.forEach((m, i) => {
@@ -190,7 +198,8 @@ export const securityHeaders: MiddlewareHandler = async (c, next) => {
     }
     c.header("Referrer-Policy", "no-referrer");
     c.header("Cross-Origin-Resource-Policy", "same-origin");
-    if (!c.res.headers.get("Cache-Control")) c.header("Cache-Control", "no-store");
+    if (!c.res.headers.get("Cache-Control"))
+        c.header("Cache-Control", "no-store");
     // HSTS only over https: a browser ignores it elsewhere, and pinning a
     // plain-http localhost would be a nuisance.
     if (isHttpsRequest(c)) {

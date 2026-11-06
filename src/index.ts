@@ -109,7 +109,12 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
 
     // MCP: the key in the path is the only credential. mcpKeyGuard answers a
     // wrong/missing key with the generic 404 BEFORE the body is touched.
-    app.on(["POST", "GET", "DELETE"], "/mcp/:key", mcpKeyGuard(opts.mcpKey), handleMcp);
+    app.on(
+        ["POST", "GET", "DELETE"],
+        "/mcp/:key",
+        mcpKeyGuard(opts.mcpKey),
+        handleMcp,
+    );
 
     // Signed export download. This step checks only signature and expiry; the
     // dashboard step adds the login cookie. Any failure is the generic 404.
@@ -131,7 +136,8 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
             status: 200,
             headers: {
                 "Content-Type": "application/zip",
-                "Content-Disposition": 'attachment; filename="nutrition-mcp-export.zip"',
+                "Content-Disposition":
+                    'attachment; filename="nutrition-mcp-export.zip"',
                 "Cache-Control": "private, no-store",
                 "X-Content-Type-Options": "nosniff",
             },
@@ -181,7 +187,10 @@ async function boot(): Promise<Hono<{ Bindings: ServerEnv }>> {
     const keys = getKeys();
     installLogRedaction(() => [keys.mcpKey, keys.exportSecret]);
     console.log(startupKeyLine(keys));
-    if (trustProxy()) console.log("[net] TRUST_PROXY=1: using the rightmost X-Forwarded-For entry");
+    if (trustProxy())
+        console.log(
+            "[net] TRUST_PROXY=1: using the rightmost X-Forwarded-For entry",
+        );
 
     getDb(); // open + migrate now, so a broken database stops the boot
     await warmWidgets();
@@ -206,13 +215,21 @@ function shutdown(signal: string): void {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`Received ${signal}, shutting down...`);
-    void Promise.race([closeMcpHandler(), new Promise((r) => setTimeout(r, 2000))])
-        .catch((err) => console.error("Error closing MCP handler:", (err as Error).message))
+    void Promise.race([
+        closeMcpHandler(),
+        new Promise((r) => setTimeout(r, 2000)),
+    ])
+        .catch((err) =>
+            console.error("Error closing MCP handler:", (err as Error).message),
+        )
         .finally(() => {
             try {
                 closeDb();
             } catch (err) {
-                console.error("Error closing database:", (err as Error).message);
+                console.error(
+                    "Error closing database:",
+                    (err as Error).message,
+                );
             }
             process.exit(0);
         });
@@ -234,7 +251,10 @@ export default {
     // Long-lived requests can idle between events; Bun's 10 s default closes
     // them. Raise it so a slow tool call is not severed.
     idleTimeout: 120,
-    fetch(req: Request, server: { requestIP(r: Request): { address: string } | null }) {
+    fetch(
+        req: Request,
+        server: { requestIP(r: Request): { address: string } | null },
+    ) {
         if (!app) return new Response("not started", { status: 503 });
         return app.fetch(req, { ip: server.requestIP(req)?.address });
     },

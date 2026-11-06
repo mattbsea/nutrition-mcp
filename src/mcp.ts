@@ -3202,121 +3202,113 @@ export function registerTools(
             ...uiMeta(MEAL_LOGGED_WIDGET_URI),
         },
         async (args) => {
-            return runTool(
-                "log_meal",
-                async () => {
-                    // Items replace the totals: each item is checked on its
-                    // own (the added-sugar gate included), and the totals are
-                    // their sum. Without items, the meal-level checks below.
-                    const {
-                        items: rawItems,
-                        food_ref: foodRef,
-                        user_stated: userStated,
-                        ...fields
-                    } = args;
-                    let input: typeof fields = fields;
-                    let items: MealItemValues[] | undefined;
-                    let labels: {
-                        sources: NutrientSources;
-                        detail: SourceDetail | null;
+            return runTool("log_meal", async () => {
+                // Items replace the totals: each item is checked on its
+                // own (the added-sugar gate included), and the totals are
+                // their sum. Without items, the meal-level checks below.
+                const {
+                    items: rawItems,
+                    food_ref: foodRef,
+                    user_stated: userStated,
+                    ...fields
+                } = args;
+                let input: typeof fields = fields;
+                let items: MealItemValues[] | undefined;
+                let labels: {
+                    sources: NutrientSources;
+                    detail: SourceDetail | null;
+                };
+                if (rawItems !== undefined) {
+                    const sent = totalsSentWithItems(fields);
+                    if (sent.length > 0) throw totalsWithItemsError(sent);
+                    refuseMealLevelRefsWithItems(foodRef, userStated);
+                    const checked = await checkedItemsWithSources(rawItems);
+                    items = checked.items;
+                    labels = {
+                        sources: checked.sources,
+                        detail: checked.detail,
                     };
-                    if (rawItems !== undefined) {
-                        const sent = totalsSentWithItems(fields);
-                        if (sent.length > 0) throw totalsWithItemsError(sent);
-                        refuseMealLevelRefsWithItems(foodRef, userStated);
-                        const checked = await checkedItemsWithSources(rawItems);
-                        items = checked.items;
-                        labels = {
-                            sources: checked.sources,
-                            detail: checked.detail,
-                        };
-                        input = { ...fields, ...totalsAsInput(checked.totals) };
-                    } else {
-                        // Before anything is read or written. Sugar without
-                        // added sugar first: the pair check below cannot fire
-                        // when added_sugar_g is absent, so the two never
-                        // compete.
-                        if (addedSugarRequiredNow() && addedSugarMissing(args))
-                            throw addedSugarMissingError();
-                        // A mismatch is the caller's to resolve, never clamped
-                        // (addedSugarError).
-                        const sugarError = addedSugarError(
-                            args.added_sugar_g,
-                            args.sugar_g,
-                        );
-                        if (sugarError) throw new ToolError(sugarError);
-                        labels = await labelRow(
-                            foodRef,
-                            loggedValuesOf(fields),
-                            userStated,
-                        );
-                    }
-                    const { iso, note } = await resolveWriteTimestamp(
-                        userId,
-                        args.logged_at,
+                    input = { ...fields, ...totalsAsInput(checked.totals) };
+                } else {
+                    // Before anything is read or written. Sugar without
+                    // added sugar first: the pair check below cannot fire
+                    // when added_sugar_g is absent, so the two never
+                    // compete.
+                    if (addedSugarRequiredNow() && addedSugarMissing(args))
+                        throw addedSugarMissingError();
+                    // A mismatch is the caller's to resolve, never clamped
+                    // (addedSugarError).
+                    const sugarError = addedSugarError(
+                        args.added_sugar_g,
+                        args.sugar_g,
                     );
-                    const { meal, deduplicated } = await insertMeal(userId, {
-                        ...input,
-                        logged_at: iso,
-                        ...(items ? { items } : {}),
-                        nutrient_sources: labels.sources,
-                        source_detail: labels.detail,
-                    });
-                    // No colon yet: the zone is appended once tz is known,
-                    // because the Time line below is a local wall clock.
-                    const header = deduplicated
-                        ? "Meal already logged — this matched an existing meal, so nothing new was added"
-                        : "Meal logged";
-
-                    const { progressSection, structuredContent, meta, tz } =
-                        await buildMealProgress(
-                            userId,
-                            meal,
-                            "logged",
-                            alcohol,
-                        );
-                    // A deduplicated insert returns the stored meal, whose
-                    // items this call did not write, so its count is read.
-                    const missingNote = await missingNutrientNoteFor(
-                        userId,
-                        meal,
-                        deduplicated ? undefined : (items?.length ?? 0),
+                    if (sugarError) throw new ToolError(sugarError);
+                    labels = await labelRow(
+                        foodRef,
+                        loggedValuesOf(fields),
+                        userStated,
                     );
+                }
+                const { iso, note } = await resolveWriteTimestamp(
+                    userId,
+                    args.logged_at,
+                );
+                const { meal, deduplicated } = await insertMeal(userId, {
+                    ...input,
+                    logged_at: iso,
+                    ...(items ? { items } : {}),
+                    nutrient_sources: labels.sources,
+                    source_detail: labels.detail,
+                });
+                // No colon yet: the zone is appended once tz is known,
+                // because the Time line below is a local wall clock.
+                const header = deduplicated
+                    ? "Meal already logged — this matched an existing meal, so nothing new was added"
+                    : "Meal logged";
 
-                    // Content only: the values are stored as sent (see
-                    // saturatedAboveFatNote). A replay that matched an existing
-                    // meal reports that meal's own values, so it is not
-                    // re-checked here.
-                    const satFatNote = deduplicated
-                        ? ""
-                        : (saturatedAboveFatNote(meal) ?? "");
-                    // Model text only: where the values came from. A replay
-                    // reports the stored meal's own labels, so it says nothing.
-                    const sourcesNote = deduplicated
-                        ? ""
-                        : sourcesNoteFor(
-                              meal,
-                              foodRef !== undefined ||
-                                  (rawItems ?? []).some(
-                                      (i) => i.food_ref !== undefined,
-                                  ),
-                          );
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${header} (${tz} time):\n${formatMealFull(meal, alcohol, tz, deduplicated ? undefined : items)}${progressSection}${satFatNote}${sourcesNote}${deduplicated ? "" : itemSourcesNoteFor(items)}${alcoholHiddenNote(
-                                    (meal.alcohol_g ?? 0) > 0,
-                                    alcohol,
-                                    "Alcohol saved with this meal",
-                                )}${missingNote}${note}`,
-                            },
-                        ],
-                        structuredContent,
-                        _meta: meta,
-                    };
-                },
-            );
+                const { progressSection, structuredContent, meta, tz } =
+                    await buildMealProgress(userId, meal, "logged", alcohol);
+                // A deduplicated insert returns the stored meal, whose
+                // items this call did not write, so its count is read.
+                const missingNote = await missingNutrientNoteFor(
+                    userId,
+                    meal,
+                    deduplicated ? undefined : (items?.length ?? 0),
+                );
+
+                // Content only: the values are stored as sent (see
+                // saturatedAboveFatNote). A replay that matched an existing
+                // meal reports that meal's own values, so it is not
+                // re-checked here.
+                const satFatNote = deduplicated
+                    ? ""
+                    : (saturatedAboveFatNote(meal) ?? "");
+                // Model text only: where the values came from. A replay
+                // reports the stored meal's own labels, so it says nothing.
+                const sourcesNote = deduplicated
+                    ? ""
+                    : sourcesNoteFor(
+                          meal,
+                          foodRef !== undefined ||
+                              (rawItems ?? []).some(
+                                  (i) => i.food_ref !== undefined,
+                              ),
+                      );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${header} (${tz} time):\n${formatMealFull(meal, alcohol, tz, deduplicated ? undefined : items)}${progressSection}${satFatNote}${sourcesNote}${deduplicated ? "" : itemSourcesNoteFor(items)}${alcoholHiddenNote(
+                                (meal.alcohol_g ?? 0) > 0,
+                                alcohol,
+                                "Alcohol saved with this meal",
+                            )}${missingNote}${note}`,
+                        },
+                    ],
+                    structuredContent,
+                    _meta: meta,
+                };
+            });
         },
     );
 
@@ -3365,30 +3357,27 @@ export function registerTools(
             ...uiMeta(IMPORT_MEALS_WIDGET_URI),
         },
         async () => {
-            return runTool(
-                "start_meal_import",
-                async () => {
-                    const profile = await getProfile(userId);
-                    const tz = timezoneFromProfile(profile);
-                    const structuredContent = startImportPayload({
-                        tz: tz ?? "UTC",
-                        tzConfigured: tz !== null,
-                        widgetsEnabled,
-                        alcohol,
-                        locale: localeFromProfile(profile) ?? "en",
-                    });
-                    const text = widgetsEnabled
-                        ? "Importer ready — pick your export file in the panel above. Nothing is saved until you confirm the preview." +
-                          (tz === null
-                              ? " Note: this account has no timezone set, so times will be read as UTC; set_timezone changes that, and it is best done before importing."
-                              : "")
-                        : "This account has widgets turned off, so the importer cannot be shown. The user can paste their export for bulk_import_meals instead, or turn widgets on with set_widget_display.";
-                    return {
-                        content: [{ type: "text" as const, text }],
-                        structuredContent,
-                    };
-                },
-            );
+            return runTool("start_meal_import", async () => {
+                const profile = await getProfile(userId);
+                const tz = timezoneFromProfile(profile);
+                const structuredContent = startImportPayload({
+                    tz: tz ?? "UTC",
+                    tzConfigured: tz !== null,
+                    widgetsEnabled,
+                    alcohol,
+                    locale: localeFromProfile(profile) ?? "en",
+                });
+                const text = widgetsEnabled
+                    ? "Importer ready — pick your export file in the panel above. Nothing is saved until you confirm the preview." +
+                      (tz === null
+                          ? " Note: this account has no timezone set, so times will be read as UTC; set_timezone changes that, and it is best done before importing."
+                          : "")
+                    : "This account has widgets turned off, so the importer cannot be shown. The user can paste their export for bulk_import_meals instead, or turn widgets on with set_widget_display.";
+                return {
+                    content: [{ type: "text" as const, text }],
+                    structuredContent,
+                };
+            });
         },
     );
 
@@ -3873,42 +3862,35 @@ export function registerTools(
             inputSchema: z.object({ detail: MEAL_DETAIL_FIELD }),
         },
         async ({ detail }) => {
-            return runTool(
-                "get_meals_today",
-                async () => {
-                    const tz = await getUserTimezone(userId);
-                    const meals = await getMealsByDate(
-                        userId,
-                        todayInTz(tz),
-                        tz,
-                    );
-                    if (meals.length === 0) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: "No meals logged today.",
-                                },
-                            ],
-                        };
-                    }
-                    // The ingredients behind each meal: a count in compact
-                    // mode, the list in full mode.
-                    const items = await getMealItems(
-                        userId,
-                        meals.map((m) => m.id),
-                    );
-                    const { text } = renderMealListing({
-                        meals,
-                        tz,
-                        alcohol,
-                        detail: detail ?? "compact",
-                        grouped: false,
-                        items,
-                    });
-                    return { content: [{ type: "text", text }] };
-                },
-            );
+            return runTool("get_meals_today", async () => {
+                const tz = await getUserTimezone(userId);
+                const meals = await getMealsByDate(userId, todayInTz(tz), tz);
+                if (meals.length === 0) {
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: "No meals logged today.",
+                            },
+                        ],
+                    };
+                }
+                // The ingredients behind each meal: a count in compact
+                // mode, the list in full mode.
+                const items = await getMealItems(
+                    userId,
+                    meals.map((m) => m.id),
+                );
+                const { text } = renderMealListing({
+                    meals,
+                    tz,
+                    alcohol,
+                    detail: detail ?? "compact",
+                    grouped: false,
+                    items,
+                });
+                return { content: [{ type: "text", text }] };
+            });
         },
     );
 
@@ -5035,101 +5017,95 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return runTool(
-                "set_nutrition_goals",
-                async () => {
-                    const [existing, preferredUnit] = await Promise.all([
-                        getNutritionGoals(userId),
-                        getPreferredWeightUnit(userId),
-                    ]);
-                    // Only demand a unit when actually writing a numeric target.
-                    let target_weight_g: number | null;
-                    if (args.target_weight === undefined) {
-                        target_weight_g = existing?.target_weight_g ?? null;
-                    } else if (args.target_weight === null) {
-                        target_weight_g = null;
-                    } else {
-                        const writeUnit = await resolveWriteWeightUnit(
-                            userId,
-                            args.unit,
-                        );
-                        target_weight_g = toGrams(
-                            args.target_weight,
-                            writeUnit,
-                        );
-                        assertPlausibleWeight(target_weight_g, writeUnit);
-                    }
-                    const displayUnit = args.unit ?? preferredUnit ?? "kg";
-                    const merged = {
-                        daily_calories:
-                            args.daily_calories === undefined
-                                ? (existing?.daily_calories ?? null)
-                                : args.daily_calories,
-                        daily_protein_g:
-                            args.daily_protein_g === undefined
-                                ? (existing?.daily_protein_g ?? null)
-                                : args.daily_protein_g,
-                        daily_carbs_g:
-                            args.daily_carbs_g === undefined
-                                ? (existing?.daily_carbs_g ?? null)
-                                : args.daily_carbs_g,
-                        daily_fat_g:
-                            args.daily_fat_g === undefined
-                                ? (existing?.daily_fat_g ?? null)
-                                : args.daily_fat_g,
-                        daily_saturated_fat_g:
-                            args.daily_saturated_fat_g === undefined
-                                ? (existing?.daily_saturated_fat_g ?? null)
-                                : args.daily_saturated_fat_g,
-                        daily_fiber_g:
-                            args.daily_fiber_g === undefined
-                                ? (existing?.daily_fiber_g ?? null)
-                                : args.daily_fiber_g,
-                        daily_sugar_g:
-                            args.daily_sugar_g === undefined
-                                ? (existing?.daily_sugar_g ?? null)
-                                : args.daily_sugar_g,
-                        daily_added_sugar_g:
-                            args.daily_added_sugar_g === undefined
-                                ? (existing?.daily_added_sugar_g ?? null)
-                                : args.daily_added_sugar_g,
-                        daily_alcohol_g:
-                            args.daily_alcohol_g === undefined
-                                ? (existing?.daily_alcohol_g ?? null)
-                                : args.daily_alcohol_g,
-                        daily_caffeine_mg:
-                            args.daily_caffeine_mg === undefined
-                                ? (existing?.daily_caffeine_mg ?? null)
-                                : args.daily_caffeine_mg,
-                        daily_sodium_mg:
-                            args.daily_sodium_mg === undefined
-                                ? (existing?.daily_sodium_mg ?? null)
-                                : args.daily_sodium_mg,
-                        daily_water_ml:
-                            args.daily_water_ml === undefined
-                                ? (existing?.daily_water_ml ?? null)
-                                : args.daily_water_ml,
-                        target_weight_g,
-                    };
-                    const goals = await upsertNutritionGoals(userId, merged);
-                    // An alcohol target set by someone who has alcohol tracking
-                    // off is saved but invisible everywhere else, so say so here
-                    // rather than let the goal silently vanish from the list.
-                    const alcoholNote = alcoholHiddenNote(
-                        args.daily_alcohol_g != null,
-                        alcohol,
-                        "Alcohol target saved",
+            return runTool("set_nutrition_goals", async () => {
+                const [existing, preferredUnit] = await Promise.all([
+                    getNutritionGoals(userId),
+                    getPreferredWeightUnit(userId),
+                ]);
+                // Only demand a unit when actually writing a numeric target.
+                let target_weight_g: number | null;
+                if (args.target_weight === undefined) {
+                    target_weight_g = existing?.target_weight_g ?? null;
+                } else if (args.target_weight === null) {
+                    target_weight_g = null;
+                } else {
+                    const writeUnit = await resolveWriteWeightUnit(
+                        userId,
+                        args.unit,
                     );
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Goals updated.\n\n${formatGoals(goals, displayUnit, alcohol)}${alcoholNote}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                    target_weight_g = toGrams(args.target_weight, writeUnit);
+                    assertPlausibleWeight(target_weight_g, writeUnit);
+                }
+                const displayUnit = args.unit ?? preferredUnit ?? "kg";
+                const merged = {
+                    daily_calories:
+                        args.daily_calories === undefined
+                            ? (existing?.daily_calories ?? null)
+                            : args.daily_calories,
+                    daily_protein_g:
+                        args.daily_protein_g === undefined
+                            ? (existing?.daily_protein_g ?? null)
+                            : args.daily_protein_g,
+                    daily_carbs_g:
+                        args.daily_carbs_g === undefined
+                            ? (existing?.daily_carbs_g ?? null)
+                            : args.daily_carbs_g,
+                    daily_fat_g:
+                        args.daily_fat_g === undefined
+                            ? (existing?.daily_fat_g ?? null)
+                            : args.daily_fat_g,
+                    daily_saturated_fat_g:
+                        args.daily_saturated_fat_g === undefined
+                            ? (existing?.daily_saturated_fat_g ?? null)
+                            : args.daily_saturated_fat_g,
+                    daily_fiber_g:
+                        args.daily_fiber_g === undefined
+                            ? (existing?.daily_fiber_g ?? null)
+                            : args.daily_fiber_g,
+                    daily_sugar_g:
+                        args.daily_sugar_g === undefined
+                            ? (existing?.daily_sugar_g ?? null)
+                            : args.daily_sugar_g,
+                    daily_added_sugar_g:
+                        args.daily_added_sugar_g === undefined
+                            ? (existing?.daily_added_sugar_g ?? null)
+                            : args.daily_added_sugar_g,
+                    daily_alcohol_g:
+                        args.daily_alcohol_g === undefined
+                            ? (existing?.daily_alcohol_g ?? null)
+                            : args.daily_alcohol_g,
+                    daily_caffeine_mg:
+                        args.daily_caffeine_mg === undefined
+                            ? (existing?.daily_caffeine_mg ?? null)
+                            : args.daily_caffeine_mg,
+                    daily_sodium_mg:
+                        args.daily_sodium_mg === undefined
+                            ? (existing?.daily_sodium_mg ?? null)
+                            : args.daily_sodium_mg,
+                    daily_water_ml:
+                        args.daily_water_ml === undefined
+                            ? (existing?.daily_water_ml ?? null)
+                            : args.daily_water_ml,
+                    target_weight_g,
+                };
+                const goals = await upsertNutritionGoals(userId, merged);
+                // An alcohol target set by someone who has alcohol tracking
+                // off is saved but invisible everywhere else, so say so here
+                // rather than let the goal silently vanish from the list.
+                const alcoholNote = alcoholHiddenNote(
+                    args.daily_alcohol_g != null,
+                    alcohol,
+                    "Alcohol target saved",
+                );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Goals updated.\n\n${formatGoals(goals, displayUnit, alcohol)}${alcoholNote}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -5148,23 +5124,20 @@ export function registerTools(
             },
         },
         async () => {
-            return runTool(
-                "get_nutrition_goals",
-                async () => {
-                    const [goals, unit] = await Promise.all([
-                        getNutritionGoals(userId),
-                        getPreferredWeightUnit(userId),
-                    ]);
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: formatGoals(goals, unit ?? "kg", alcohol),
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("get_nutrition_goals", async () => {
+                const [goals, unit] = await Promise.all([
+                    getNutritionGoals(userId),
+                    getPreferredWeightUnit(userId),
+                ]);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: formatGoals(goals, unit ?? "kg", alcohol),
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -5418,38 +5391,31 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return runTool(
-                "delete_meal",
-                async () => {
-                    // Answered, not thrown: nothing with that id exists, the
-                    // same as a well-formed id that matches no row.
-                    if (!isUuid(id)) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: notUuidText(
-                                        "meal",
-                                        id,
-                                        MEAL_ID_SOURCES,
-                                    ),
-                                },
-                            ],
-                        };
-                    }
-                    const deleted = await deleteMeal(userId, id);
+            return runTool("delete_meal", async () => {
+                // Answered, not thrown: nothing with that id exists, the
+                // same as a well-formed id that matches no row.
+                if (!isUuid(id)) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: deleted
-                                    ? `Meal ${id} deleted.`
-                                    : `No meal found with id ${id}.`,
+                                text: notUuidText("meal", id, MEAL_ID_SOURCES),
                             },
                         ],
                     };
-                },
-            );
+                }
+                const deleted = await deleteMeal(userId, id);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: deleted
+                                ? `Meal ${id} deleted.`
+                                : `No meal found with id ${id}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -5580,134 +5546,120 @@ export function registerTools(
             user_stated: userStated,
             ...fields
         }) => {
-            return runTool(
-                "update_meal",
-                async () => {
-                    // Before resolveWriteTimestamp, which reads the profile.
-                    if (!isUuid(id))
+            return runTool("update_meal", async () => {
+                // Before resolveWriteTimestamp, which reads the profile.
+                if (!isUuid(id))
+                    throw new ToolError(
+                        notUuidText("meal", id, MEAL_ID_SOURCES),
+                    );
+                let itemsChecked: Awaited<
+                    ReturnType<typeof checkedItemsWithSources>
+                > | null = null;
+                if (rawItems !== undefined) {
+                    // Items replace the totals: the totals fields may not
+                    // come alongside, and each item is checked on its own.
+                    const sent = totalsSentWithItems(fields);
+                    if (sent.length > 0) throw totalsWithItemsError(sent);
+                    refuseMealLevelRefsWithItems(foodRef, userStated);
+                    itemsChecked = await checkedItemsWithSources(rawItems);
+                } else if (totalsSentWithItems(fields).length > 0) {
+                    // A meal logged with items has totals that are their
+                    // sum, so a direct edit of a total would contradict
+                    // its items.
+                    const count = await countMealItems(userId, id);
+                    if (count > 0)
                         throw new ToolError(
-                            notUuidText("meal", id, MEAL_ID_SOURCES),
+                            `This meal's totals are the sum of its ${count} item${count === 1 ? "" : "s"}, so they change through items (the full new list) rather than directly.`,
+                            { category: "meal_items_invalid" },
                         );
-                    let itemsChecked: Awaited<
-                        ReturnType<typeof checkedItemsWithSources>
-                    > | null = null;
-                    if (rawItems !== undefined) {
-                        // Items replace the totals: the totals fields may not
-                        // come alongside, and each item is checked on its own.
-                        const sent = totalsSentWithItems(fields);
-                        if (sent.length > 0) throw totalsWithItemsError(sent);
-                        refuseMealLevelRefsWithItems(foodRef, userStated);
-                        itemsChecked = await checkedItemsWithSources(rawItems);
-                    } else if (totalsSentWithItems(fields).length > 0) {
-                        // A meal logged with items has totals that are their
-                        // sum, so a direct edit of a total would contradict
-                        // its items.
-                        const count = await countMealItems(userId, id);
-                        if (count > 0)
-                            throw new ToolError(
-                                `This meal's totals are the sum of its ${count} item${count === 1 ? "" : "s"}, so they change through items (the full new list) rather than directly.`,
-                                { category: "meal_items_invalid" },
-                            );
-                    }
-                    // The sugar checks run on the row the plain write is computed
-                    // from (writePlainMealUpdate). A pair sent together needs no
-                    // stored partner, so it is checked from this call alone.
-                    const passedSugar = fields.sugar_g !== undefined;
-                    const passedAdded = fields.added_sugar_g !== undefined;
-                    const checkPairedSugar = (stored: Meal | null): void => {
-                        if (!passedSugar && !passedAdded) return;
-                        const partner =
-                            passedSugar && passedAdded ? null : stored;
-                        if (
-                            partner &&
-                            addedSugarRequiredNow() &&
-                            addedSugarMissing(fields, partner.added_sugar_g)
-                        )
-                            throw addedSugarMissingError(id);
-                        const sugarError = updatedAddedSugarError(
-                            fields,
-                            partner,
-                        );
-                        if (sugarError) throw new ToolError(sugarError);
-                    };
-                    // A plain meal's changed nutrients take fresh labels and the
-                    // rest keep theirs; an itemized meal's labels come from its
-                    // items (already in itemsChecked).
-                    if (!itemsChecked) {
-                        refuseLabelsWithoutValues(
-                            foodRef,
-                            userStated,
-                            totalsSentWithItems(fields).length > 0,
-                        );
-                        if (foodRef !== undefined) parseFoodRef(foodRef);
-                    }
-                    let written: { meal: Meal; note: string };
-                    if (itemsChecked) {
-                        const { iso, note } = await resolveWriteTimestamp(
-                            userId,
-                            fields.logged_at,
-                        );
-                        written = {
-                            meal: await replaceMealItems(
-                                userId,
-                                id,
-                                {
-                                    ...fields,
-                                    ...itemsChecked.totals,
-                                    logged_at: iso,
-                                    nutrient_sources: itemsChecked.sources,
-                                    source_detail: itemsChecked.detail,
-                                },
-                                itemsChecked.items,
-                            ),
-                            note,
-                        };
-                    } else {
-                        written = await writePlainMealUpdate(
+                }
+                // The sugar checks run on the row the plain write is computed
+                // from (writePlainMealUpdate). A pair sent together needs no
+                // stored partner, so it is checked from this call alone.
+                const passedSugar = fields.sugar_g !== undefined;
+                const passedAdded = fields.added_sugar_g !== undefined;
+                const checkPairedSugar = (stored: Meal | null): void => {
+                    if (!passedSugar && !passedAdded) return;
+                    const partner = passedSugar && passedAdded ? null : stored;
+                    if (
+                        partner &&
+                        addedSugarRequiredNow() &&
+                        addedSugarMissing(fields, partner.added_sugar_g)
+                    )
+                        throw addedSugarMissingError(id);
+                    const sugarError = updatedAddedSugarError(fields, partner);
+                    if (sugarError) throw new ToolError(sugarError);
+                };
+                // A plain meal's changed nutrients take fresh labels and the
+                // rest keep theirs; an itemized meal's labels come from its
+                // items (already in itemsChecked).
+                if (!itemsChecked) {
+                    refuseLabelsWithoutValues(
+                        foodRef,
+                        userStated,
+                        totalsSentWithItems(fields).length > 0,
+                    );
+                    if (foodRef !== undefined) parseFoodRef(foodRef);
+                }
+                let written: { meal: Meal; note: string };
+                if (itemsChecked) {
+                    const { iso, note } = await resolveWriteTimestamp(
+                        userId,
+                        fields.logged_at,
+                    );
+                    written = {
+                        meal: await replaceMealItems(
                             userId,
                             id,
-                            fields,
-                            foodRef,
-                            userStated,
-                            checkPairedSugar,
-                        );
-                    }
-                    const { meal, note } = written;
-                    const { progressSection, structuredContent, meta, tz } =
-                        await buildMealProgress(
-                            userId,
-                            meal,
-                            "updated",
-                            alcohol,
-                        );
-                    const missingNote = await missingNutrientNoteFor(
-                        userId,
-                        meal,
-                        itemsChecked?.items.length,
-                    );
-                    const sourcesNote = sourcesNoteFor(
-                        meal,
-                        foodRef !== undefined ||
-                            (rawItems ?? []).some(
-                                (i) => i.food_ref !== undefined,
-                            ),
-                    );
-                    return {
-                        content: [
                             {
-                                type: "text",
-                                text: `Meal updated (${tz} time):\n${formatMealFull(meal, alcohol, tz, itemsChecked?.items)}${progressSection}${saturatedAboveFatNote(meal) ?? ""}${sourcesNote}${itemSourcesNoteFor(itemsChecked?.items)}${alcoholHiddenNote(
-                                    (meal.alcohol_g ?? 0) > 0,
-                                    alcohol,
-                                    "Alcohol saved with this meal",
-                                )}${missingNote}${note}`,
+                                ...fields,
+                                ...itemsChecked.totals,
+                                logged_at: iso,
+                                nutrient_sources: itemsChecked.sources,
+                                source_detail: itemsChecked.detail,
                             },
-                        ],
-                        structuredContent,
-                        _meta: meta,
+                            itemsChecked.items,
+                        ),
+                        note,
                     };
-                },
-            );
+                } else {
+                    written = await writePlainMealUpdate(
+                        userId,
+                        id,
+                        fields,
+                        foodRef,
+                        userStated,
+                        checkPairedSugar,
+                    );
+                }
+                const { meal, note } = written;
+                const { progressSection, structuredContent, meta, tz } =
+                    await buildMealProgress(userId, meal, "updated", alcohol);
+                const missingNote = await missingNutrientNoteFor(
+                    userId,
+                    meal,
+                    itemsChecked?.items.length,
+                );
+                const sourcesNote = sourcesNoteFor(
+                    meal,
+                    foodRef !== undefined ||
+                        (rawItems ?? []).some((i) => i.food_ref !== undefined),
+                );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Meal updated (${tz} time):\n${formatMealFull(meal, alcohol, tz, itemsChecked?.items)}${progressSection}${saturatedAboveFatNote(meal) ?? ""}${sourcesNote}${itemSourcesNoteFor(itemsChecked?.items)}${alcoholHiddenNote(
+                                (meal.alcohol_g ?? 0) > 0,
+                                alcohol,
+                                "Alcohol saved with this meal",
+                            )}${missingNote}${note}`,
+                        },
+                    ],
+                    structuredContent,
+                    _meta: meta,
+                };
+            });
         },
     );
     server.registerTool(
@@ -5848,168 +5800,156 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return runTool(
-                "save_meal",
-                async () => {
-                    const name = validateSavedMealName(args.name);
+            return runTool("save_meal", async () => {
+                const name = validateSavedMealName(args.name);
+                if ((await countSavedMeals(userId)) >= MAX_SAVED_MEALS_PER_USER)
+                    throw new ToolError(
+                        `This account already holds ${MAX_SAVED_MEALS_PER_USER} saved meals, the most it can keep. delete_saved_meal removes one.`,
+                        { category: "meal_items_invalid" },
+                    );
+                const description =
+                    args.description !== undefined
+                        ? validateSavedMealDescription(args.description)
+                        : undefined;
+                const sentTotals = totalsSentWithItems(args);
+
+                let saved: SavedMealWithItems;
+                let labels: {
+                    sources: NutrientSources;
+                    detail: SourceDetail | null;
+                };
+                if (args.from_meal_id !== undefined) {
+                    if (!isUuid(args.from_meal_id))
+                        throw new ToolError(
+                            notUuidText(
+                                "meal",
+                                args.from_meal_id,
+                                MEAL_ID_SOURCES,
+                            ),
+                        );
                     if (
-                        (await countSavedMeals(userId)) >=
-                        MAX_SAVED_MEALS_PER_USER
+                        args.food_ref !== undefined ||
+                        (args.user_stated?.length ?? 0) > 0
                     )
                         throw new ToolError(
-                            `This account already holds ${MAX_SAVED_MEALS_PER_USER} saved meals, the most it can keep. delete_saved_meal removes one.`,
+                            "from_meal_id copies the logged meal's labels for its values, so food_ref and user_stated cannot be sent with it.",
+                            { category: "food_ref_invalid" },
+                        );
+                    if (args.items !== undefined || sentTotals.length > 0)
+                        throw new ToolError(
+                            "from_meal_id copies a logged meal's totals and ingredients, so items and totals cannot be sent with it. description and meal_type can still be sent.",
                             { category: "meal_items_invalid" },
                         );
-                    const description =
-                        args.description !== undefined
-                            ? validateSavedMealDescription(args.description)
-                            : undefined;
-                    const sentTotals = totalsSentWithItems(args);
-
-                    let saved: SavedMealWithItems;
-                    let labels: {
-                        sources: NutrientSources;
-                        detail: SourceDetail | null;
-                    };
-                    if (args.from_meal_id !== undefined) {
-                        if (!isUuid(args.from_meal_id))
-                            throw new ToolError(
-                                notUuidText(
-                                    "meal",
-                                    args.from_meal_id,
-                                    MEAL_ID_SOURCES,
-                                ),
-                            );
-                        if (
-                            args.food_ref !== undefined ||
-                            (args.user_stated?.length ?? 0) > 0
-                        )
-                            throw new ToolError(
-                                "from_meal_id copies the logged meal's labels for its values, so food_ref and user_stated cannot be sent with it.",
-                                { category: "food_ref_invalid" },
-                            );
-                        if (args.items !== undefined || sentTotals.length > 0)
-                            throw new ToolError(
-                                "from_meal_id copies a logged meal's totals and ingredients, so items and totals cannot be sent with it. description and meal_type can still be sent.",
-                                { category: "meal_items_invalid" },
-                            );
-                        const source = await getMealById(
-                            userId,
-                            args.from_meal_id,
+                    const source = await getMealById(userId, args.from_meal_id);
+                    if (!source)
+                        throw new ToolError(
+                            `No meal found with id ${args.from_meal_id}.`,
                         );
-                        if (!source)
-                            throw new ToolError(
-                                `No meal found with id ${args.from_meal_id}.`,
-                            );
-                        const sourceItems =
-                            (await getMealItems(userId, [source.id])).get(
-                                source.id,
-                            ) ?? [];
-                        // A logged meal's description has no length bound, so
-                        // a long one is refused here rather than by the
-                        // database; a description sent alongside replaces it.
-                        const copied = source.description.trim();
-                        const copiedLength = [...copied].length;
-                        if (
-                            description === undefined &&
-                            copiedLength > MAX_SAVED_MEAL_DESCRIPTION_CHARS
-                        )
-                            throw new ToolError(
-                                `The meal being copied has a description of ${copiedLength} characters, and a saved meal's description holds at most ${MAX_SAVED_MEAL_DESCRIPTION_CHARS}. A description sent with from_meal_id replaces the copied one.`,
-                                { category: "meal_items_invalid" },
-                            );
-                        saved = await savedMealWrite(
-                            userId,
+                    const sourceItems =
+                        (await getMealItems(userId, [source.id])).get(
+                            source.id,
+                        ) ?? [];
+                    // A logged meal's description has no length bound, so
+                    // a long one is refused here rather than by the
+                    // database; a description sent alongside replaces it.
+                    const copied = source.description.trim();
+                    const copiedLength = [...copied].length;
+                    if (
+                        description === undefined &&
+                        copiedLength > MAX_SAVED_MEAL_DESCRIPTION_CHARS
+                    )
+                        throw new ToolError(
+                            `The meal being copied has a description of ${copiedLength} characters, and a saved meal's description holds at most ${MAX_SAVED_MEAL_DESCRIPTION_CHARS}. A description sent with from_meal_id replaces the copied one.`,
+                            { category: "meal_items_invalid" },
+                        );
+                    saved = await savedMealWrite(
+                        userId,
+                        name,
+                        {
+                            ...nutrientsFrom(source),
                             name,
-                            {
-                                ...nutrientsFrom(source),
-                                name,
-                                description:
-                                    description ??
-                                    (copiedLength > 0 ? copied : name),
-                                meal_type: args.meal_type ?? source.meal_type,
-                                // A copy keeps the labels the logged meal has.
-                                nutrient_sources: parseNutrientSources(
-                                    source.nutrient_sources ?? null,
-                                ),
-                                source_detail: parseSourceDetail(
-                                    source.source_detail ?? null,
-                                ),
-                            },
-                            sourceItems,
+                            description:
+                                description ??
+                                (copiedLength > 0 ? copied : name),
+                            meal_type: args.meal_type ?? source.meal_type,
+                            // A copy keeps the labels the logged meal has.
+                            nutrient_sources: parseNutrientSources(
+                                source.nutrient_sources ?? null,
+                            ),
+                            source_detail: parseSourceDetail(
+                                source.source_detail ?? null,
+                            ),
+                        },
+                        sourceItems,
+                    );
+                } else {
+                    let values: NutrientValues;
+                    let items: MealItemValues[] = [];
+                    if (args.items !== undefined) {
+                        if (sentTotals.length > 0)
+                            throw totalsWithItemsError(sentTotals);
+                        refuseMealLevelRefsWithItems(
+                            args.food_ref,
+                            args.user_stated,
                         );
+                        const checked = await checkedItemsWithSources(
+                            args.items,
+                        );
+                        values = checked.totals;
+                        items = checked.items;
+                        labels = {
+                            sources: checked.sources,
+                            detail: checked.detail,
+                        };
                     } else {
-                        let values: NutrientValues;
-                        let items: MealItemValues[] = [];
-                        if (args.items !== undefined) {
-                            if (sentTotals.length > 0)
-                                throw totalsWithItemsError(sentTotals);
-                            refuseMealLevelRefsWithItems(
-                                args.food_ref,
-                                args.user_stated,
+                        if (args.calories === undefined)
+                            throw new ToolError(
+                                "A saved meal is kept from either items or its totals per serving, and the totals need calories at least.",
+                                { category: "meal_items_invalid" },
                             );
-                            const checked = await checkedItemsWithSources(
-                                args.items,
-                            );
-                            values = checked.totals;
-                            items = checked.items;
-                            labels = {
-                                sources: checked.sources,
-                                detail: checked.detail,
-                            };
-                        } else {
-                            if (args.calories === undefined)
-                                throw new ToolError(
-                                    "A saved meal is kept from either items or its totals per serving, and the totals need calories at least.",
-                                    { category: "meal_items_invalid" },
-                                );
-                            // The same two meal-level checks log_meal runs.
-                            if (
-                                addedSugarRequiredNow() &&
-                                addedSugarMissing(args)
-                            )
-                                throw addedSugarMissingError();
-                            const sugarError = addedSugarError(
-                                args.added_sugar_g,
-                                args.sugar_g,
-                            );
-                            if (sugarError) throw new ToolError(sugarError);
-                            values = nutrientsFrom(args);
-                            labels = await labelRow(
-                                args.food_ref,
-                                loggedValuesOf(values),
-                                args.user_stated,
-                            );
-                        }
-                        saved = await savedMealWrite(
-                            userId,
-                            name,
-                            {
-                                ...values,
-                                name,
-                                description: description ?? name,
-                                meal_type: args.meal_type ?? null,
-                                nutrient_sources: labels.sources,
-                                source_detail: labels.detail,
-                            },
-                            items,
+                        // The same two meal-level checks log_meal runs.
+                        if (addedSugarRequiredNow() && addedSugarMissing(args))
+                            throw addedSugarMissingError();
+                        const sugarError = addedSugarError(
+                            args.added_sugar_g,
+                            args.sugar_g,
+                        );
+                        if (sugarError) throw new ToolError(sugarError);
+                        values = nutrientsFrom(args);
+                        labels = await labelRow(
+                            args.food_ref,
+                            loggedValuesOf(values),
+                            args.user_stated,
                         );
                     }
-                    const alcoholNote = alcoholHiddenNote(
-                        (saved.alcohol_g ?? 0) > 0,
-                        alcohol,
-                        "Alcohol saved with this saved meal",
+                    saved = await savedMealWrite(
+                        userId,
+                        name,
+                        {
+                            ...values,
+                            name,
+                            description: description ?? name,
+                            meal_type: args.meal_type ?? null,
+                            nutrient_sources: labels.sources,
+                            source_detail: labels.detail,
+                        },
+                        items,
                     );
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Saved meal "${saved.name}" [saved meal id: ${saved.id}]\n${savedMealBody(saved, alcohol)}${sourcesNoteFor(saved, args.food_ref !== undefined || (args.items ?? []).some((i) => i.food_ref !== undefined))}${itemSourcesNoteFor(saved.items)}${alcoholNote}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                }
+                const alcoholNote = alcoholHiddenNote(
+                    (saved.alcohol_g ?? 0) > 0,
+                    alcohol,
+                    "Alcohol saved with this saved meal",
+                );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Saved meal "${saved.name}" [saved meal id: ${saved.id}]\n${savedMealBody(saved, alcohol)}${sourcesNoteFor(saved, args.food_ref !== undefined || (args.items ?? []).some((i) => i.food_ref !== undefined))}${itemSourcesNoteFor(saved.items)}${alcoholNote}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -6180,125 +6120,112 @@ export function registerTools(
             ...uiMeta(MEAL_LOGGED_WIDGET_URI),
         },
         async (args) => {
-            return runTool(
-                "log_saved_meal",
-                async () => {
-                    const saved = await resolveSavedMeal(
-                        userId,
-                        args.saved_meal,
+            return runTool("log_saved_meal", async () => {
+                const saved = await resolveSavedMeal(userId, args.saved_meal);
+                const servings = args.servings ?? 1;
+                const mealType = args.meal_type ?? saved.meal_type;
+                if (!mealType)
+                    throw new ToolError(
+                        "This saved meal has no default meal type; meal_type gives one.",
+                        { category: "meal_items_invalid" },
                     );
-                    const servings = args.servings ?? 1;
-                    const mealType = args.meal_type ?? saved.meal_type;
-                    if (!mealType)
+                const changed =
+                    (args.item_amounts?.length ?? 0) > 0 ||
+                    (args.leave_out?.length ?? 0) > 0;
+                let items: MealItemValues[] | undefined;
+                let totals: NutrientValues;
+                let labels: {
+                    sources: NutrientSources | null;
+                    detail: SourceDetail | null;
+                };
+                if (saved.items.length > 0) {
+                    // Servings first, then the item changes, so an
+                    // item_amounts value is the amount in this entry
+                    // rather than one servings multiplies again.
+                    items = applyItemChanges(
+                        scaleItems(saved.items, servings),
+                        {
+                            item_amounts: args.item_amounts,
+                            leave_out: args.leave_out,
+                        },
+                    );
+                    totals = sumItems(items);
+                    // Item labels are kept per item; the meal's are
+                    // re-derived from the items actually eaten.
+                    const derived = deriveFromItems(items);
+                    labels = {
+                        sources: derived.sources,
+                        detail: derived.detail,
+                    };
+                } else {
+                    if (changed)
                         throw new ToolError(
-                            "This saved meal has no default meal type; meal_type gives one.",
+                            "This saved meal has no items, so item_amounts and leave_out do not apply; servings scales the whole meal.",
                             { category: "meal_items_invalid" },
                         );
-                    const changed =
-                        (args.item_amounts?.length ?? 0) > 0 ||
-                        (args.leave_out?.length ?? 0) > 0;
-                    let items: MealItemValues[] | undefined;
-                    let totals: NutrientValues;
-                    let labels: {
-                        sources: NutrientSources | null;
-                        detail: SourceDetail | null;
+                    totals = scaleTotals(nutrientsFrom(saved), servings);
+                    // Servings scale the values, so a record-backed label
+                    // stays true with its amount scaled too (scaleSourceDetail).
+                    labels = {
+                        sources: saved.nutrient_sources ?? null,
+                        detail: scaleSourceDetail(
+                            saved.source_detail ?? null,
+                            servings,
+                        ),
                     };
-                    if (saved.items.length > 0) {
-                        // Servings first, then the item changes, so an
-                        // item_amounts value is the amount in this entry
-                        // rather than one servings multiplies again.
-                        items = applyItemChanges(
-                            scaleItems(saved.items, servings),
-                            {
-                                item_amounts: args.item_amounts,
-                                leave_out: args.leave_out,
-                            },
-                        );
-                        totals = sumItems(items);
-                        // Item labels are kept per item; the meal's are
-                        // re-derived from the items actually eaten.
-                        const derived = deriveFromItems(items);
-                        labels = {
-                            sources: derived.sources,
-                            detail: derived.detail,
-                        };
-                    } else {
-                        if (changed)
-                            throw new ToolError(
-                                "This saved meal has no items, so item_amounts and leave_out do not apply; servings scales the whole meal.",
-                                { category: "meal_items_invalid" },
-                            );
-                        totals = scaleTotals(nutrientsFrom(saved), servings);
-                        // Servings scale the values, so a record-backed label
-                        // stays true with its amount scaled too (scaleSourceDetail).
-                        labels = {
-                            sources: saved.nutrient_sources ?? null,
-                            detail: scaleSourceDetail(
-                                saved.source_detail ?? null,
-                                servings,
-                            ),
-                        };
-                    }
-                    // A servings multiplier or a changed amount can take the
-                    // meal past what log_meal accepts (and calories past the
-                    // integer column); refused before anything is written.
-                    assertMealTotals(totals);
-                    const description =
-                        args.description ??
-                        saved.description +
-                            (servings !== 1 ? ` (${servings} servings)` : "");
-                    const { iso, note } = await resolveWriteTimestamp(
-                        userId,
-                        args.logged_at,
-                    );
-                    const { meal, deduplicated } = await insertMeal(userId, {
-                        description,
-                        meal_type: mealType as MealInput["meal_type"],
-                        ...totalsAsInput(totals),
-                        logged_at: iso,
-                        notes: args.notes,
-                        idempotency_key: args.idempotency_key,
-                        saved_meal_id: saved.id,
-                        ...(items ? { items } : {}),
-                        nutrient_sources: labels.sources,
-                        source_detail: labels.detail,
-                    });
-                    const header = deduplicated
-                        ? "Meal already logged — this matched an existing meal, so nothing new was added"
-                        : "Meal logged";
-                    const { progressSection, structuredContent, meta, tz } =
-                        await buildMealProgress(
-                            userId,
-                            meal,
-                            "logged",
-                            alcohol,
-                        );
-                    const block =
-                        items && !deduplicated
-                            ? `\n${formatItemsBlock(items, alcohol !== null)}`
-                            : "";
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${header} (${tz} time):\n${formatMealFull(meal, alcohol, tz)}\n\nFrom saved meal "${saved.name}".${block}${progressSection}${sourcesNoteFor(meal, false)}${deduplicated ? "" : itemSourcesNoteFor(items)}${alcoholHiddenNote(
-                                    (meal.alcohol_g ?? 0) > 0,
-                                    alcohol,
-                                    "Alcohol saved with this meal",
-                                )}${await missingNutrientNoteFor(
-                                    userId,
-                                    meal,
-                                    deduplicated
-                                        ? undefined
-                                        : (items?.length ?? 0),
-                                )}${note}`,
-                            },
-                        ],
-                        structuredContent,
-                        _meta: meta,
-                    };
-                },
-            );
+                }
+                // A servings multiplier or a changed amount can take the
+                // meal past what log_meal accepts (and calories past the
+                // integer column); refused before anything is written.
+                assertMealTotals(totals);
+                const description =
+                    args.description ??
+                    saved.description +
+                        (servings !== 1 ? ` (${servings} servings)` : "");
+                const { iso, note } = await resolveWriteTimestamp(
+                    userId,
+                    args.logged_at,
+                );
+                const { meal, deduplicated } = await insertMeal(userId, {
+                    description,
+                    meal_type: mealType as MealInput["meal_type"],
+                    ...totalsAsInput(totals),
+                    logged_at: iso,
+                    notes: args.notes,
+                    idempotency_key: args.idempotency_key,
+                    saved_meal_id: saved.id,
+                    ...(items ? { items } : {}),
+                    nutrient_sources: labels.sources,
+                    source_detail: labels.detail,
+                });
+                const header = deduplicated
+                    ? "Meal already logged — this matched an existing meal, so nothing new was added"
+                    : "Meal logged";
+                const { progressSection, structuredContent, meta, tz } =
+                    await buildMealProgress(userId, meal, "logged", alcohol);
+                const block =
+                    items && !deduplicated
+                        ? `\n${formatItemsBlock(items, alcohol !== null)}`
+                        : "";
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${header} (${tz} time):\n${formatMealFull(meal, alcohol, tz)}\n\nFrom saved meal "${saved.name}".${block}${progressSection}${sourcesNoteFor(meal, false)}${deduplicated ? "" : itemSourcesNoteFor(items)}${alcoholHiddenNote(
+                                (meal.alcohol_g ?? 0) > 0,
+                                alcohol,
+                                "Alcohol saved with this meal",
+                            )}${await missingNutrientNoteFor(
+                                userId,
+                                meal,
+                                deduplicated ? undefined : (items?.length ?? 0),
+                            )}${note}`,
+                        },
+                    ],
+                    structuredContent,
+                    _meta: meta,
+                };
+            });
         },
     );
 
@@ -6432,127 +6359,119 @@ export function registerTools(
             user_stated: userStated,
             ...fields
         }) => {
-            return runTool(
-                "update_saved_meal",
-                async () => {
-                    if (!isUuid(id))
-                        throw new ToolError(
-                            notUuidText(
-                                "saved meal",
-                                id,
-                                SAVED_MEAL_ID_SOURCES,
-                            ),
-                        );
-                    const name =
-                        fields.name !== undefined
-                            ? validateSavedMealName(fields.name)
-                            : undefined;
-                    const description =
-                        fields.description !== undefined
-                            ? validateSavedMealDescription(fields.description)
-                            : undefined;
-                    const sentTotals = totalsSentWithItems(fields);
-                    if (
-                        name === undefined &&
-                        fields.description === undefined &&
-                        fields.meal_type === undefined &&
-                        rawItems === undefined &&
-                        sentTotals.length === 0
-                    )
-                        throw new ToolError(
-                            "Nothing to change: pass a name, description, meal_type, items or totals.",
-                        );
-                    const notFound = () =>
-                        new ToolError(`No saved meal found with id ${id}.`);
+            return runTool("update_saved_meal", async () => {
+                if (!isUuid(id))
+                    throw new ToolError(
+                        notUuidText("saved meal", id, SAVED_MEAL_ID_SOURCES),
+                    );
+                const name =
+                    fields.name !== undefined
+                        ? validateSavedMealName(fields.name)
+                        : undefined;
+                const description =
+                    fields.description !== undefined
+                        ? validateSavedMealDescription(fields.description)
+                        : undefined;
+                const sentTotals = totalsSentWithItems(fields);
+                if (
+                    name === undefined &&
+                    fields.description === undefined &&
+                    fields.meal_type === undefined &&
+                    rawItems === undefined &&
+                    sentTotals.length === 0
+                )
+                    throw new ToolError(
+                        "Nothing to change: pass a name, description, meal_type, items or totals.",
+                    );
+                const notFound = () =>
+                    new ToolError(`No saved meal found with id ${id}.`);
 
-                    let items: MealItemValues[] | null = null;
-                    let totals: Partial<NutrientValues> = {};
-                    let labels: {
-                        sources: NutrientSources;
-                        detail: SourceDetail | null;
-                    } | null = null;
-                    // Bounds before anything is read.
-                    refuseLabelsWithoutValues(
-                        foodRef,
-                        userStated,
-                        sentTotals.length > 0 || rawItems !== undefined,
-                    );
-                    if (foodRef !== undefined) parseFoodRef(foodRef);
-                    if (rawItems !== undefined) {
-                        if (sentTotals.length > 0)
-                            throw totalsWithItemsError(sentTotals);
-                        refuseMealLevelRefsWithItems(foodRef, userStated);
-                        const checked = await checkedItemsWithSources(rawItems);
-                        items = checked.items;
-                        totals = checked.totals;
-                        labels = {
-                            sources: checked.sources,
-                            detail: checked.detail,
-                        };
-                    }
-                    const base: Partial<SavedMealInput> = {
-                        ...(name !== undefined ? { name } : {}),
-                        ...(description !== undefined ? { description } : {}),
-                        ...(fields.meal_type !== undefined
-                            ? { meal_type: fields.meal_type }
-                            : {}),
+                let items: MealItemValues[] | null = null;
+                let totals: Partial<NutrientValues> = {};
+                let labels: {
+                    sources: NutrientSources;
+                    detail: SourceDetail | null;
+                } | null = null;
+                // Bounds before anything is read.
+                refuseLabelsWithoutValues(
+                    foodRef,
+                    userStated,
+                    sentTotals.length > 0 || rawItems !== undefined,
+                );
+                if (foodRef !== undefined) parseFoodRef(foodRef);
+                if (rawItems !== undefined) {
+                    if (sentTotals.length > 0)
+                        throw totalsWithItemsError(sentTotals);
+                    refuseMealLevelRefsWithItems(foodRef, userStated);
+                    const checked = await checkedItemsWithSources(rawItems);
+                    items = checked.items;
+                    totals = checked.totals;
+                    labels = {
+                        sources: checked.sources,
+                        detail: checked.detail,
                     };
-                    let updated: SavedMealWithItems | null;
-                    try {
-                        updated =
-                            rawItems === undefined && sentTotals.length > 0
-                                ? await writeSavedMealTotals(
-                                      userId,
-                                      id,
-                                      base,
-                                      sentTotals,
-                                      Object.fromEntries(
-                                          sentTotals.map((k) => [k, fields[k]]),
-                                      ) as Partial<NutrientValues>,
-                                      foodRef,
-                                      userStated,
-                                  )
-                                : await updateSavedMeal(
-                                      userId,
-                                      id,
-                                      {
-                                          ...totals,
-                                          ...base,
-                                          ...(labels
-                                              ? {
-                                                    nutrient_sources:
-                                                        labels.sources,
-                                                    source_detail:
-                                                        labels.detail,
-                                                }
-                                              : {}),
-                                      },
-                                      items,
-                                  );
-                    } catch (err) {
-                        if (err instanceof SavedMealNameTaken)
-                            throw savedMealNameTakenError(
-                                name ?? "",
-                                err.existingId,
-                            );
-                        throw err;
-                    }
-                    if (!updated) throw notFound();
-                    const alcoholNote = alcoholHiddenNote(
-                        (updated.alcohol_g ?? 0) > 0,
-                        alcohol,
-                        "Alcohol saved with this saved meal",
-                    );
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Saved meal "${updated.name}" updated. Meals already logged from it keep their values.\n${savedMealBody(updated, alcohol)}${sourcesNoteFor(updated, foodRef !== undefined || (rawItems ?? []).some((i) => i.food_ref !== undefined))}${alcoholNote}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                }
+                const base: Partial<SavedMealInput> = {
+                    ...(name !== undefined ? { name } : {}),
+                    ...(description !== undefined ? { description } : {}),
+                    ...(fields.meal_type !== undefined
+                        ? { meal_type: fields.meal_type }
+                        : {}),
+                };
+                let updated: SavedMealWithItems | null;
+                try {
+                    updated =
+                        rawItems === undefined && sentTotals.length > 0
+                            ? await writeSavedMealTotals(
+                                  userId,
+                                  id,
+                                  base,
+                                  sentTotals,
+                                  Object.fromEntries(
+                                      sentTotals.map((k) => [k, fields[k]]),
+                                  ) as Partial<NutrientValues>,
+                                  foodRef,
+                                  userStated,
+                              )
+                            : await updateSavedMeal(
+                                  userId,
+                                  id,
+                                  {
+                                      ...totals,
+                                      ...base,
+                                      ...(labels
+                                          ? {
+                                                nutrient_sources:
+                                                    labels.sources,
+                                                source_detail: labels.detail,
+                                            }
+                                          : {}),
+                                  },
+                                  items,
+                              );
+                } catch (err) {
+                    if (err instanceof SavedMealNameTaken)
+                        throw savedMealNameTakenError(
+                            name ?? "",
+                            err.existingId,
+                        );
+                    throw err;
+                }
+                if (!updated) throw notFound();
+                const alcoholNote = alcoholHiddenNote(
+                    (updated.alcohol_g ?? 0) > 0,
+                    alcohol,
+                    "Alcohol saved with this saved meal",
+                );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Saved meal "${updated.name}" updated. Meals already logged from it keep their values.\n${savedMealBody(updated, alcohol)}${sourcesNoteFor(updated, foodRef !== undefined || (rawItems ?? []).some((i) => i.food_ref !== undefined))}${alcoholNote}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -6578,36 +6497,33 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return runTool(
-                "delete_saved_meal",
-                async () => {
-                    if (!isUuid(id)) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: notUuidText(
-                                        "saved meal",
-                                        id,
-                                        SAVED_MEAL_ID_SOURCES,
-                                    ),
-                                },
-                            ],
-                        };
-                    }
-                    const deleted = await deleteSavedMeal(userId, id);
+            return runTool("delete_saved_meal", async () => {
+                if (!isUuid(id)) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: deleted
-                                    ? `Saved meal "${deleted.name}" deleted. Meals already logged from it keep their values.`
-                                    : `No saved meal found with id ${id}.`,
+                                text: notUuidText(
+                                    "saved meal",
+                                    id,
+                                    SAVED_MEAL_ID_SOURCES,
+                                ),
                             },
                         ],
                     };
-                },
-            );
+                }
+                const deleted = await deleteSavedMeal(userId, id);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: deleted
+                                ? `Saved meal "${deleted.name}" deleted. Meals already logged from it keep their values.`
+                                : `No saved meal found with id ${id}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -6656,30 +6572,27 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return runTool(
-                "log_water",
-                async () => {
-                    const { iso, note, tz } = await resolveWriteTimestamp(
-                        userId,
-                        args.logged_at,
-                    );
-                    const { entry, deduplicated } = await insertWater(userId, {
-                        ...args,
-                        logged_at: iso,
-                    });
-                    const prefix = deduplicated
-                        ? "Already logged — this matched an existing entry, so nothing new was added"
-                        : "Water logged";
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${prefix}: ${entry.amount_ml} ml at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ID: ${entry.id}${note}`,
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("log_water", async () => {
+                const { iso, note, tz } = await resolveWriteTimestamp(
+                    userId,
+                    args.logged_at,
+                );
+                const { entry, deduplicated } = await insertWater(userId, {
+                    ...args,
+                    logged_at: iso,
+                });
+                const prefix = deduplicated
+                    ? "Already logged — this matched an existing entry, so nothing new was added"
+                    : "Water logged";
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${prefix}: ${entry.amount_ml} ml at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ID: ${entry.id}${note}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -6698,40 +6611,33 @@ export function registerTools(
             },
         },
         async () => {
-            return runTool(
-                "get_water_today",
-                async () => {
-                    const tz = await getUserTimezone(userId);
-                    const entries = await getWaterByDate(
-                        userId,
-                        todayInTz(tz),
-                        tz,
-                    );
-                    if (entries.length === 0) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: "No water logged today.",
-                                },
-                            ],
-                        };
-                    }
-                    const total = sumWater(entries);
-                    const lines = entries.map(
-                        (e) =>
-                            `- ${e.amount_ml} ml at ${localTimeOf(e.logged_at, tz, false)}${e.notes ? ` (${e.notes})` : ""} [id: ${e.id}]`,
-                    );
+            return runTool("get_water_today", async () => {
+                const tz = await getUserTimezone(userId);
+                const entries = await getWaterByDate(userId, todayInTz(tz), tz);
+                if (entries.length === 0) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Total: ${total} ml (${entries.length} entr${entries.length === 1 ? "y" : "ies"}). ${timesAreLocal(tz)}\n\n${lines.join("\n")}`,
+                                text: "No water logged today.",
                             },
                         ],
                     };
-                },
-            );
+                }
+                const total = sumWater(entries);
+                const lines = entries.map(
+                    (e) =>
+                        `- ${e.amount_ml} ml at ${localTimeOf(e.logged_at, tz, false)}${e.notes ? ` (${e.notes})` : ""} [id: ${e.id}]`,
+                );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Total: ${total} ml (${entries.length} entr${entries.length === 1 ? "y" : "ies"}). ${timesAreLocal(tz)}\n\n${lines.join("\n")}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -6809,38 +6715,35 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return runTool(
-                "delete_water",
-                async () => {
-                    // Answered, not thrown: nothing with that id exists, the
-                    // same as a well-formed id that matches no row.
-                    if (!isUuid(id)) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: notUuidText(
-                                        "water entry",
-                                        id,
-                                        WATER_ID_SOURCES,
-                                    ),
-                                },
-                            ],
-                        };
-                    }
-                    const deleted = await deleteWater(userId, id);
+            return runTool("delete_water", async () => {
+                // Answered, not thrown: nothing with that id exists, the
+                // same as a well-formed id that matches no row.
+                if (!isUuid(id)) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: deleted
-                                    ? `Water entry ${id} deleted.`
-                                    : `No water entry found with id ${id}.`,
+                                text: notUuidText(
+                                    "water entry",
+                                    id,
+                                    WATER_ID_SOURCES,
+                                ),
                             },
                         ],
                     };
-                },
-            );
+                }
+                const deleted = await deleteWater(userId, id);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: deleted
+                                ? `Water entry ${id} deleted.`
+                                : `No water entry found with id ${id}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -6889,58 +6792,50 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return runTool(
-                "log_active_calories",
-                async () => {
-                    const problem = activeKcalError(args.kcal);
-                    if (problem !== null) throw new ToolError(problem);
-                    const { iso, note, tz } = await resolveWriteTimestamp(
-                        userId,
-                        args.logged_at,
-                    );
-                    // The credit share is snapshotted onto the row now, so a
-                    // later set_activity_credit leaves this entry as it was.
-                    const creditPct = activityCreditPctFromProfile(
-                        await getProfile(userId),
-                    );
-                    const { entry, deduplicated } = await insertActiveCalories(
-                        userId,
+            return runTool("log_active_calories", async () => {
+                const problem = activeKcalError(args.kcal);
+                if (problem !== null) throw new ToolError(problem);
+                const { iso, note, tz } = await resolveWriteTimestamp(
+                    userId,
+                    args.logged_at,
+                );
+                // The credit share is snapshotted onto the row now, so a
+                // later set_activity_credit leaves this entry as it was.
+                const creditPct = activityCreditPctFromProfile(
+                    await getProfile(userId),
+                );
+                const { entry, deduplicated } = await insertActiveCalories(
+                    userId,
+                    {
+                        kcal: args.kcal,
+                        credit_pct: creditPct,
+                        logged_at: iso,
+                        notes: args.notes,
+                        idempotency_key: args.idempotency_key,
+                    },
+                );
+                const day = dateInTz(entry.logged_at, tz);
+                const dayRows = await getActivityInRange(userId, day, day, tz);
+                const dayTotals = sumActivity(countedActivity(dayRows, tz));
+                // A day the Apple Health activity sync totals already
+                // includes this burn, so the entry is kept but not added.
+                const healthDay = dayRows.find(isHealthDayTotal);
+                const healthNote = healthDay
+                    ? ` ${day} has an Apple Health day total (${healthDay.kcal} kcal), which already includes the day's workouts, so this entry is kept but not added to the day's total.`
+                    : "";
+                const prefix = deduplicated
+                    ? "Already logged — this matched an existing entry, so nothing new was added"
+                    : "Active calories logged";
+                const counted = creditedKcal(entry.kcal, entry.credit_pct);
+                return {
+                    content: [
                         {
-                            kcal: args.kcal,
-                            credit_pct: creditPct,
-                            logged_at: iso,
-                            notes: args.notes,
-                            idempotency_key: args.idempotency_key,
+                            type: "text",
+                            text: `${prefix}: ${entry.kcal} kcal burned at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ${counted} kcal of it counts against intake at ${entry.credit_pct}%. Day ${day}: ${dayTotals.burned_kcal} kcal burned, ${dayTotals.credited_kcal} kcal counted against intake. The calorie goal is unchanged.${healthNote} ID: ${entry.id}${note}`,
                         },
-                    );
-                    const day = dateInTz(entry.logged_at, tz);
-                    const dayRows = await getActivityInRange(
-                        userId,
-                        day,
-                        day,
-                        tz,
-                    );
-                    const dayTotals = sumActivity(countedActivity(dayRows, tz));
-                    // A day the Apple Health activity sync totals already
-                    // includes this burn, so the entry is kept but not added.
-                    const healthDay = dayRows.find(isHealthDayTotal);
-                    const healthNote = healthDay
-                        ? ` ${day} has an Apple Health day total (${healthDay.kcal} kcal), which already includes the day's workouts, so this entry is kept but not added to the day's total.`
-                        : "";
-                    const prefix = deduplicated
-                        ? "Already logged — this matched an existing entry, so nothing new was added"
-                        : "Active calories logged";
-                    const counted = creditedKcal(entry.kcal, entry.credit_pct);
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${prefix}: ${entry.kcal} kcal burned at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ${counted} kcal of it counts against intake at ${entry.credit_pct}%. Day ${day}: ${dayTotals.burned_kcal} kcal burned, ${dayTotals.credited_kcal} kcal counted against intake. The calorie goal is unchanged.${healthNote} ID: ${entry.id}${note}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                    ],
+                };
+            });
         },
     );
 
@@ -7094,36 +6989,33 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return runTool(
-                "delete_active_calories",
-                async () => {
-                    if (!isUuid(id)) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: notUuidText(
-                                        "active-calories entry",
-                                        id,
-                                        ACTIVE_ID_SOURCES,
-                                    ),
-                                },
-                            ],
-                        };
-                    }
-                    const deleted = await deleteActiveCalories(userId, id);
+            return runTool("delete_active_calories", async () => {
+                if (!isUuid(id)) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: deleted
-                                    ? `Active calories entry ${id} deleted.`
-                                    : `No active calories entry found with id ${id}.`,
+                                text: notUuidText(
+                                    "active-calories entry",
+                                    id,
+                                    ACTIVE_ID_SOURCES,
+                                ),
                             },
                         ],
                     };
-                },
-            );
+                }
+                const deleted = await deleteActiveCalories(userId, id);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: deleted
+                                ? `Active calories entry ${id} deleted.`
+                                : `No active calories entry found with id ${id}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7149,30 +7041,27 @@ export function registerTools(
             }),
         },
         async ({ percent }) => {
-            return runTool(
-                "set_activity_credit",
-                async () => {
-                    if (percent !== null) {
-                        const problem = creditPctError(percent);
-                        if (problem !== null) throw new ToolError(problem);
-                    }
-                    const profile = await upsertProfile(userId, {
-                        activity_credit_pct: percent,
-                    });
-                    const pct = activityCreditPctFromProfile(profile);
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text:
-                                    percent === null
-                                        ? "Activity credit reset to the default of 100%. Active calories logged from now on count fully against intake; entries logged before keep the share they were logged with. The calorie goal is unchanged."
-                                        : `Activity credit set to ${pct}%. Active calories logged from now on count ${pct}% against intake; entries logged before keep the share they were logged with. The calorie goal is unchanged.`,
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_activity_credit", async () => {
+                if (percent !== null) {
+                    const problem = creditPctError(percent);
+                    if (problem !== null) throw new ToolError(problem);
+                }
+                const profile = await upsertProfile(userId, {
+                    activity_credit_pct: percent,
+                });
+                const pct = activityCreditPctFromProfile(profile);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text:
+                                percent === null
+                                    ? "Activity credit reset to the default of 100%. Active calories logged from now on count fully against intake; entries logged before keep the share they were logged with. The calorie goal is unchanged."
+                                    : `Activity credit set to ${pct}%. Active calories logged from now on count ${pct}% against intake; entries logged before keep the share they were logged with. The calorie goal is unchanged.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7228,38 +7117,32 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return runTool(
-                "log_weight",
-                async () => {
-                    const { iso, note, tz } = await resolveWriteTimestamp(
-                        userId,
-                        args.logged_at,
-                    );
-                    const unit = await resolveWriteWeightUnit(
-                        userId,
-                        args.unit,
-                    );
-                    const weight_g = toGrams(args.weight, unit);
-                    assertPlausibleWeight(weight_g, unit);
-                    const { entry, deduplicated } = await insertWeight(userId, {
-                        weight_g,
-                        logged_at: iso,
-                        notes: args.notes,
-                        idempotency_key: args.idempotency_key,
-                    });
-                    const prefix = deduplicated
-                        ? "Already logged — this matched an existing entry, so nothing new was added"
-                        : "Weight logged";
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${prefix}: ${formatWeight(entry.weight_g, unit)} at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ID: ${entry.id}${note}`,
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("log_weight", async () => {
+                const { iso, note, tz } = await resolveWriteTimestamp(
+                    userId,
+                    args.logged_at,
+                );
+                const unit = await resolveWriteWeightUnit(userId, args.unit);
+                const weight_g = toGrams(args.weight, unit);
+                assertPlausibleWeight(weight_g, unit);
+                const { entry, deduplicated } = await insertWeight(userId, {
+                    weight_g,
+                    logged_at: iso,
+                    notes: args.notes,
+                    idempotency_key: args.idempotency_key,
+                });
+                const prefix = deduplicated
+                    ? "Already logged — this matched an existing entry, so nothing new was added"
+                    : "Weight logged";
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${prefix}: ${formatWeight(entry.weight_g, unit)} at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ID: ${entry.id}${note}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7278,42 +7161,39 @@ export function registerTools(
             },
         },
         async () => {
-            return runTool(
-                "get_weight_today",
-                async () => {
-                    const [tz, weightPref] = await Promise.all([
-                        getUserTimezone(userId),
-                        getPreferredWeightUnit(userId),
-                    ]);
-                    const unit = weightPref ?? "kg";
-                    const entries = await getWeightByDate(
-                        userId,
-                        todayInTz(tz),
-                        tz,
-                    );
-                    if (entries.length === 0) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: "No weight logged today.",
-                                },
-                            ],
-                        };
-                    }
-                    const lines = entries.map((e) =>
-                        formatWeightEntry(e, unit, tz),
-                    );
+            return runTool("get_weight_today", async () => {
+                const [tz, weightPref] = await Promise.all([
+                    getUserTimezone(userId),
+                    getPreferredWeightUnit(userId),
+                ]);
+                const unit = weightPref ?? "kg";
+                const entries = await getWeightByDate(
+                    userId,
+                    todayInTz(tz),
+                    tz,
+                );
+                if (entries.length === 0) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Today (${entries.length} entr${entries.length === 1 ? "y" : "ies"}). ${timesAreLocal(tz)}\n\n${lines.join("\n")}`,
+                                text: "No weight logged today.",
                             },
                         ],
                     };
-                },
-            );
+                }
+                const lines = entries.map((e) =>
+                    formatWeightEntry(e, unit, tz),
+                );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Today (${entries.length} entr${entries.length === 1 ? "y" : "ies"}). ${timesAreLocal(tz)}\n\n${lines.join("\n")}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7674,52 +7554,44 @@ export function registerTools(
             }),
         },
         async ({ id, weight, unit, logged_at, notes }) => {
-            return runTool(
-                "update_weight",
-                async () => {
-                    // Before resolveWriteTimestamp, which reads the profile.
-                    if (!isUuid(id))
-                        throw new ToolError(
-                            notUuidText("weight entry", id, WEIGHT_ID_SOURCES),
-                        );
-                    const { iso, note, tz } = await resolveWriteTimestamp(
-                        userId,
-                        logged_at,
+            return runTool("update_weight", async () => {
+                // Before resolveWriteTimestamp, which reads the profile.
+                if (!isUuid(id))
+                    throw new ToolError(
+                        notUuidText("weight entry", id, WEIGHT_ID_SOURCES),
                     );
-                    const patch: {
-                        weight_g?: number;
-                        logged_at?: string;
-                        notes?: string | null;
-                    } = {};
-                    // Only require a unit when a new weight value is supplied;
-                    // otherwise fall back to kg purely for formatting the result.
-                    let displayUnit: WeightUnit;
-                    if (weight !== undefined) {
-                        displayUnit = await resolveWriteWeightUnit(
-                            userId,
-                            unit,
-                        );
-                        patch.weight_g = toGrams(weight, displayUnit);
-                        assertPlausibleWeight(patch.weight_g, displayUnit);
-                    } else {
-                        displayUnit =
-                            unit ??
-                            (await getPreferredWeightUnit(userId)) ??
-                            "kg";
-                    }
-                    if (iso !== undefined) patch.logged_at = iso;
-                    if (notes !== undefined) patch.notes = notes;
-                    const entry = await updateWeight(userId, id, patch);
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Weight updated (${tz} time):\n${formatWeightEntry(entry, displayUnit, tz, true)}${note}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                const { iso, note, tz } = await resolveWriteTimestamp(
+                    userId,
+                    logged_at,
+                );
+                const patch: {
+                    weight_g?: number;
+                    logged_at?: string;
+                    notes?: string | null;
+                } = {};
+                // Only require a unit when a new weight value is supplied;
+                // otherwise fall back to kg purely for formatting the result.
+                let displayUnit: WeightUnit;
+                if (weight !== undefined) {
+                    displayUnit = await resolveWriteWeightUnit(userId, unit);
+                    patch.weight_g = toGrams(weight, displayUnit);
+                    assertPlausibleWeight(patch.weight_g, displayUnit);
+                } else {
+                    displayUnit =
+                        unit ?? (await getPreferredWeightUnit(userId)) ?? "kg";
+                }
+                if (iso !== undefined) patch.logged_at = iso;
+                if (notes !== undefined) patch.notes = notes;
+                const entry = await updateWeight(userId, id, patch);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Weight updated (${tz} time):\n${formatWeightEntry(entry, displayUnit, tz, true)}${note}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7744,38 +7616,35 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return runTool(
-                "delete_weight",
-                async () => {
-                    // Answered, not thrown: nothing with that id exists, the
-                    // same as a well-formed id that matches no row.
-                    if (!isUuid(id)) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: notUuidText(
-                                        "weight entry",
-                                        id,
-                                        WEIGHT_ID_SOURCES,
-                                    ),
-                                },
-                            ],
-                        };
-                    }
-                    const deleted = await deleteWeight(userId, id);
+            return runTool("delete_weight", async () => {
+                // Answered, not thrown: nothing with that id exists, the
+                // same as a well-formed id that matches no row.
+                if (!isUuid(id)) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: deleted
-                                    ? `Weight entry ${id} deleted.`
-                                    : `No weight entry found with id ${id}.`,
+                                text: notUuidText(
+                                    "weight entry",
+                                    id,
+                                    WEIGHT_ID_SOURCES,
+                                ),
                             },
                         ],
                     };
-                },
-            );
+                }
+                const deleted = await deleteWeight(userId, id);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: deleted
+                                ? `Weight entry ${id} deleted.`
+                                : `No weight entry found with id ${id}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7802,29 +7671,26 @@ export function registerTools(
             }),
         },
         async ({ unit }) => {
-            return runTool(
-                "set_weight_unit",
-                async () => {
-                    if (unit !== null && !isWeightUnit(unit)) {
-                        throw new ToolError(
-                            `Invalid weight unit: ${unit}. Use 'kg', 'lb', or null to clear.`,
-                        );
-                    }
-                    const profile = await upsertProfile(userId, {
-                        preferred_weight_unit: unit,
-                    });
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: profile.preferred_weight_unit
-                                    ? `Preferred weight unit set to ${profile.preferred_weight_unit}.`
-                                    : "Preferred weight unit cleared. Logging will require an explicit unit until you set one, and weights display in kg.",
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_weight_unit", async () => {
+                if (unit !== null && !isWeightUnit(unit)) {
+                    throw new ToolError(
+                        `Invalid weight unit: ${unit}. Use 'kg', 'lb', or null to clear.`,
+                    );
+                }
+                const profile = await upsertProfile(userId, {
+                    preferred_weight_unit: unit,
+                });
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: profile.preferred_weight_unit
+                                ? `Preferred weight unit set to ${profile.preferred_weight_unit}.`
+                                : "Preferred weight unit cleared. Logging will require an explicit unit until you set one, and weights display in kg.",
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -7882,49 +7748,43 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return runTool(
-                "log_body_measurement",
-                async () => {
-                    const { iso, note, tz } = await resolveWriteTimestamp(
-                        userId,
-                        args.logged_at,
-                    );
-                    const unit = await resolveWriteLengthUnit(
-                        userId,
-                        args.unit,
-                    );
-                    const value_mm = assertPlausibleLength(
-                        args.kind,
-                        args.value,
-                        unit,
-                    );
-                    const { entry, deduplicated } = await insertBodyMeasurement(
-                        userId,
+            return runTool("log_body_measurement", async () => {
+                const { iso, note, tz } = await resolveWriteTimestamp(
+                    userId,
+                    args.logged_at,
+                );
+                const unit = await resolveWriteLengthUnit(userId, args.unit);
+                const value_mm = assertPlausibleLength(
+                    args.kind,
+                    args.value,
+                    unit,
+                );
+                const { entry, deduplicated } = await insertBodyMeasurement(
+                    userId,
+                    {
+                        kind: args.kind,
+                        value_mm,
+                        value_entered: args.value,
+                        entered_unit: unit,
+                        logged_at: iso,
+                        notes: args.notes,
+                        idempotency_key: args.idempotency_key,
+                    },
+                );
+                const prefix = deduplicated
+                    ? "Already logged — this matched an existing entry, so nothing new was added"
+                    : "Body measurement logged";
+                // Rendered from the stored row, so a deduplicated call
+                // shows the entry that already exists.
+                return {
+                    content: [
                         {
-                            kind: args.kind,
-                            value_mm,
-                            value_entered: args.value,
-                            entered_unit: unit,
-                            logged_at: iso,
-                            notes: args.notes,
-                            idempotency_key: args.idempotency_key,
+                            type: "text",
+                            text: `${prefix}: ${measurementLabel(entry.kind)} ${formatMeasurementValue(entry, entry.entered_unit)} at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ID: ${entry.id}${note}`,
                         },
-                    );
-                    const prefix = deduplicated
-                        ? "Already logged — this matched an existing entry, so nothing new was added"
-                        : "Body measurement logged";
-                    // Rendered from the stored row, so a deduplicated call
-                    // shows the entry that already exists.
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${prefix}: ${measurementLabel(entry.kind)} ${formatMeasurementValue(entry, entry.entered_unit)} at ${localTimeOf(entry.logged_at, tz, true)} (${tz})${entry.notes ? ` (${entry.notes})` : ""}. ID: ${entry.id}${note}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                    ],
+                };
+            });
         },
     );
 
@@ -8095,72 +7955,65 @@ export function registerTools(
             }),
         },
         async ({ id, value, unit, logged_at, notes }) => {
-            return runTool(
-                "update_body_measurement",
-                async () => {
-                    // Before resolveWriteTimestamp, which reads the profile.
-                    if (!isUuid(id))
-                        throw new ToolError(
-                            notUuidText(
-                                "body measurement",
-                                id,
-                                MEASUREMENT_ID_SOURCES,
-                            ),
-                        );
-                    // Worded without "update": categorizeError's tier 3 reads
-                    // any "date" substring as invalid_date_format.
-                    if (
-                        value === undefined &&
-                        unit === undefined &&
-                        logged_at === undefined &&
-                        notes === undefined
-                    )
-                        throw new ToolError(
-                            "Nothing to change: value, unit, logged_at or notes is needed.",
-                        );
-                    const { iso, note, tz } = await resolveWriteTimestamp(
-                        userId,
-                        logged_at,
+            return runTool("update_body_measurement", async () => {
+                // Before resolveWriteTimestamp, which reads the profile.
+                if (!isUuid(id))
+                    throw new ToolError(
+                        notUuidText(
+                            "body measurement",
+                            id,
+                            MEASUREMENT_ID_SOURCES,
+                        ),
                     );
-                    const patch: {
-                        value_mm?: number;
-                        value_entered?: number;
-                        entered_unit?: LengthUnit;
-                        logged_at?: string;
-                        notes?: string | null;
-                    } = {};
-                    if (value !== undefined || unit !== undefined) {
-                        // Always read: the plausible range depends on the
-                        // row's kind, and a missing half comes from the row.
-                        const current = await getBodyMeasurement(userId, id);
-                        if (!current)
-                            throw new ToolError(
-                                `No body measurement found with id ${id}.`,
-                            );
-                        const u: LengthUnit = unit ?? current.entered_unit;
-                        const v = value ?? Number(current.value_entered);
-                        const kindOf: BodyMeasurementKind = current.kind;
-                        patch.value_mm = assertPlausibleLength(kindOf, v, u);
-                        patch.value_entered = v;
-                        patch.entered_unit = u;
-                    }
-                    if (iso !== undefined) patch.logged_at = iso;
-                    if (notes !== undefined) patch.notes = notes;
-                    const entry = await updateBodyMeasurement(
-                        userId,
-                        id,
-                        patch,
+                // Worded without "update": categorizeError's tier 3 reads
+                // any "date" substring as invalid_date_format.
+                if (
+                    value === undefined &&
+                    unit === undefined &&
+                    logged_at === undefined &&
+                    notes === undefined
+                )
+                    throw new ToolError(
+                        "Nothing to change: value, unit, logged_at or notes is needed.",
                     );
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Body measurement updated (${tz} time):\n${formatMeasurementEntry(entry, entry.entered_unit, tz, true)}${note}`,
-                            },
-                        ],
-                    };
-                },
-            );
+                const { iso, note, tz } = await resolveWriteTimestamp(
+                    userId,
+                    logged_at,
+                );
+                const patch: {
+                    value_mm?: number;
+                    value_entered?: number;
+                    entered_unit?: LengthUnit;
+                    logged_at?: string;
+                    notes?: string | null;
+                } = {};
+                if (value !== undefined || unit !== undefined) {
+                    // Always read: the plausible range depends on the
+                    // row's kind, and a missing half comes from the row.
+                    const current = await getBodyMeasurement(userId, id);
+                    if (!current)
+                        throw new ToolError(
+                            `No body measurement found with id ${id}.`,
+                        );
+                    const u: LengthUnit = unit ?? current.entered_unit;
+                    const v = value ?? Number(current.value_entered);
+                    const kindOf: BodyMeasurementKind = current.kind;
+                    patch.value_mm = assertPlausibleLength(kindOf, v, u);
+                    patch.value_entered = v;
+                    patch.entered_unit = u;
+                }
+                if (iso !== undefined) patch.logged_at = iso;
+                if (notes !== undefined) patch.notes = notes;
+                const entry = await updateBodyMeasurement(userId, id, patch);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Body measurement updated (${tz} time):\n${formatMeasurementEntry(entry, entry.entered_unit, tz, true)}${note}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8185,38 +8038,35 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return runTool(
-                "delete_body_measurement",
-                async () => {
-                    // Answered, not thrown: nothing with that id exists, the
-                    // same as a well-formed id that matches no row.
-                    if (!isUuid(id)) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: notUuidText(
-                                        "body measurement",
-                                        id,
-                                        MEASUREMENT_ID_SOURCES,
-                                    ),
-                                },
-                            ],
-                        };
-                    }
-                    const deleted = await deleteBodyMeasurement(userId, id);
+            return runTool("delete_body_measurement", async () => {
+                // Answered, not thrown: nothing with that id exists, the
+                // same as a well-formed id that matches no row.
+                if (!isUuid(id)) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: deleted
-                                    ? `Body measurement ${id} deleted.`
-                                    : `No body measurement found with id ${id}.`,
+                                text: notUuidText(
+                                    "body measurement",
+                                    id,
+                                    MEASUREMENT_ID_SOURCES,
+                                ),
                             },
                         ],
                     };
-                },
-            );
+                }
+                const deleted = await deleteBodyMeasurement(userId, id);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: deleted
+                                ? `Body measurement ${id} deleted.`
+                                : `No body measurement found with id ${id}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8243,30 +8093,27 @@ export function registerTools(
             }),
         },
         async ({ unit }) => {
-            return runTool(
-                "set_length_unit",
-                async () => {
-                    if (unit !== null && !isLengthUnit(unit)) {
-                        throw new ToolError(
-                            `Invalid length unit: ${unit}. Valid values are 'cm', 'in', or null to clear.`,
-                        );
-                    }
-                    const profile = await upsertProfile(userId, {
-                        preferred_length_unit: unit,
-                    });
-                    const saved = preferredLengthUnitFromProfile(profile);
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: saved
-                                    ? `Preferred length unit set to ${saved}.`
-                                    : "Preferred length unit cleared. Logging a measurement now needs an explicit unit, and each measurement is shown in the unit it was entered in.",
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_length_unit", async () => {
+                if (unit !== null && !isLengthUnit(unit)) {
+                    throw new ToolError(
+                        `Invalid length unit: ${unit}. Valid values are 'cm', 'in', or null to clear.`,
+                    );
+                }
+                const profile = await upsertProfile(userId, {
+                    preferred_length_unit: unit,
+                });
+                const saved = preferredLengthUnitFromProfile(profile);
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: saved
+                                ? `Preferred length unit set to ${saved}.`
+                                : "Preferred length unit cleared. Logging a measurement now needs an explicit unit, and each measurement is shown in the unit it was entered in.",
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8292,24 +8139,21 @@ export function registerTools(
             }),
         },
         async ({ enabled }) => {
-            return runTool(
-                "set_widget_display",
-                async () => {
-                    const profile = await upsertProfile(userId, {
-                        widgets_enabled: enabled,
-                    });
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: profile.widgets_enabled
-                                    ? "Widgets enabled. Supported tools will show a visual widget alongside their text in new conversations."
-                                    : "Widgets disabled. Supported tools will return text and data only, with no widget, in new conversations.",
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_widget_display", async () => {
+                const profile = await upsertProfile(userId, {
+                    widgets_enabled: enabled,
+                });
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: profile.widgets_enabled
+                                ? "Widgets enabled. Supported tools will show a visual widget alongside their text in new conversations."
+                                : "Widgets disabled. Supported tools will return text and data only, with no widget, in new conversations.",
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8352,32 +8196,29 @@ export function registerTools(
         // re-reading the profile every time — so the very next tool call, in the
         // same open chat, already sees the new setting.
         async ({ enabled, drink_unit }) => {
-            return runTool(
-                "set_alcohol_tracking",
-                async () => {
-                    const profile = await upsertProfile(userId, {
-                        alcohol_tracking_enabled: enabled,
-                        // Left untouched when omitted, so toggling tracking off
-                        // and on again does not reset the unit.
-                        ...(drink_unit !== undefined
-                            ? { preferred_drink_unit: drink_unit }
-                            : {}),
-                    });
-                    const unit = isDrinkUnit(profile.preferred_drink_unit)
-                        ? profile.preferred_drink_unit
-                        : "us";
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: profile.alcohol_tracking_enabled
-                                    ? `Alcohol tracking enabled, shown in grams alongside ${drinkUnitLabel(unit)}. It appears in meals, goals and daily progress from your next tool call — no need to start a new chat.`
-                                    : "Alcohol tracking disabled, effective immediately. Alcohol is no longer shown in meals, goals or progress; anything already logged is kept and reappears if you turn it back on.",
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_alcohol_tracking", async () => {
+                const profile = await upsertProfile(userId, {
+                    alcohol_tracking_enabled: enabled,
+                    // Left untouched when omitted, so toggling tracking off
+                    // and on again does not reset the unit.
+                    ...(drink_unit !== undefined
+                        ? { preferred_drink_unit: drink_unit }
+                        : {}),
+                });
+                const unit = isDrinkUnit(profile.preferred_drink_unit)
+                    ? profile.preferred_drink_unit
+                    : "us";
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: profile.alcohol_tracking_enabled
+                                ? `Alcohol tracking enabled, shown in grams alongside ${drinkUnitLabel(unit)}. It appears in meals, goals and daily progress from your next tool call — no need to start a new chat.`
+                                : "Alcohol tracking disabled, effective immediately. Alcohol is no longer shown in meals, goals or progress; anything already logged is kept and reappears if you turn it back on.",
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8697,48 +8538,45 @@ export function registerTools(
             },
         },
         async () => {
-            return runTool(
-                "export_all_data",
-                async () => {
-                    const { counts, goals, profile, url } =
-                        await exportAllData(userId);
-                    // No link means the account had nothing at all — not even a
-                    // profile row — so there is no archive to hand over.
-                    if (!url) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: "No data to export yet.",
-                                },
-                            ],
-                        };
-                    }
-                    // Name every file's row count, zeros included: the archive
-                    // always ships every file, so "0 weight entries" is what
-                    // tells the user weight.csv is headers-only because they
-                    // never logged weight — not because the export lost it.
-                    const contents = [
-                        `${counts.meals} meal${counts.meals === 1 ? "" : "s"}`,
-                        `${counts.water} water ${counts.water === 1 ? "entry" : "entries"}`,
-                        `${counts.weight} weight ${counts.weight === 1 ? "entry" : "entries"}`,
-                        `${counts.bodyMeasurements} body measurement${counts.bodyMeasurements === 1 ? "" : "s"}`,
-                        goals ? "nutrition goals" : "no nutrition goals set",
-                        `${counts.goalsHistory} goal ${counts.goalsHistory === 1 ? "change" : "changes"}`,
-                        profile ? "profile settings" : "no profile settings",
-                        `${counts.connections} Apple Health shortcut connection ${counts.connections === 1 ? "record" : "records"}`,
-                        `${counts.healthSync} Apple Health sync ${counts.healthSync === 1 ? "day" : "days"}`,
-                    ].join(", ");
+            return runTool("export_all_data", async () => {
+                const { counts, goals, profile, url } =
+                    await exportAllData(userId);
+                // No link means the account had nothing at all — not even a
+                // profile row — so there is no archive to hand over.
+                if (!url) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Exported all data to a ZIP archive: ${contents}.\nDownload (link valid for 60 minutes): ${url}`,
+                                text: "No data to export yet.",
                             },
                         ],
                     };
-                },
-            );
+                }
+                // Name every file's row count, zeros included: the archive
+                // always ships every file, so "0 weight entries" is what
+                // tells the user weight.csv is headers-only because they
+                // never logged weight — not because the export lost it.
+                const contents = [
+                    `${counts.meals} meal${counts.meals === 1 ? "" : "s"}`,
+                    `${counts.water} water ${counts.water === 1 ? "entry" : "entries"}`,
+                    `${counts.weight} weight ${counts.weight === 1 ? "entry" : "entries"}`,
+                    `${counts.bodyMeasurements} body measurement${counts.bodyMeasurements === 1 ? "" : "s"}`,
+                    goals ? "nutrition goals" : "no nutrition goals set",
+                    `${counts.goalsHistory} goal ${counts.goalsHistory === 1 ? "change" : "changes"}`,
+                    profile ? "profile settings" : "no profile settings",
+                    `${counts.connections} Apple Health shortcut connection ${counts.connections === 1 ? "record" : "records"}`,
+                    `${counts.healthSync} Apple Health sync ${counts.healthSync === 1 ? "day" : "days"}`,
+                ].join(", ");
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Exported all data to a ZIP archive: ${contents}.\nDownload (link valid for 60 minutes): ${url}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8810,72 +8648,68 @@ export function registerTools(
             },
         },
         async () => {
-            return runTool(
-                "get_profile",
-                async () => {
-                    const [profile, healthSync, activitySync] =
-                        await Promise.all([
-                            getProfile(userId),
-                            // Read beside the profile, and never allowed to fail
-                            // it: the sync status is one line of many, and the
-                            // rest of the profile is what this tool is for.
-                            createSqliteHealthSyncStore()
-                                .getLinkStatus(userId)
-                                .catch((err: unknown) => {
-                                    const ref = newErrorRef();
-                                    console.warn(
-                                        `[get_profile] health-sync status error ref=${ref}: ${JSON.stringify(err instanceof Error ? err.message : String(err))}`,
-                                    );
-                                    return undefined;
-                                }),
-                            createSqliteHealthActivityLinkStore()
-                                .getActivityLinkStatus(userId)
-                                .catch(() => undefined),
-                        ]);
-                    const tz = timezoneFromProfile(profile);
-                    const locale = localeFromProfile(profile);
-                    const weightUnit = preferredWeightUnitFromProfile(profile);
-                    const lengthUnit = preferredLengthUnitFromProfile(profile);
-                    const widgetsEnabled = widgetsEnabledFromProfile(profile);
-                    const alcoholEnabled =
-                        alcoholTrackingEnabledFromProfile(profile);
-                    const drinkUnit =
-                        preferredDrinkUnitFromProfile(profile) ?? "us";
+            return runTool("get_profile", async () => {
+                const [profile, healthSync, activitySync] = await Promise.all([
+                    getProfile(userId),
+                    // Read beside the profile, and never allowed to fail
+                    // it: the sync status is one line of many, and the
+                    // rest of the profile is what this tool is for.
+                    createSqliteHealthSyncStore()
+                        .getLinkStatus(userId)
+                        .catch((err: unknown) => {
+                            const ref = newErrorRef();
+                            console.warn(
+                                `[get_profile] health-sync status error ref=${ref}: ${JSON.stringify(err instanceof Error ? err.message : String(err))}`,
+                            );
+                            return undefined;
+                        }),
+                    createSqliteHealthActivityLinkStore()
+                        .getActivityLinkStatus(userId)
+                        .catch(() => undefined),
+                ]);
+                const tz = timezoneFromProfile(profile);
+                const locale = localeFromProfile(profile);
+                const weightUnit = preferredWeightUnitFromProfile(profile);
+                const lengthUnit = preferredLengthUnitFromProfile(profile);
+                const widgetsEnabled = widgetsEnabledFromProfile(profile);
+                const alcoholEnabled =
+                    alcoholTrackingEnabledFromProfile(profile);
+                const drinkUnit =
+                    preferredDrinkUnitFromProfile(profile) ?? "us";
 
-                    const lines = [
-                        tz === null
-                            ? `Timezone: not set (defaulting to UTC). ${formatClockLine("UTC")} The user can set one with set_timezone so 'today' matches their local calendar day.`
-                            : `Timezone: ${tz}. ${formatClockLine(tz)}`,
-                        locale === null
-                            ? "Language: not set (defaulting to English). The user can choose one with set_language."
-                            : `Language: ${LOCALE_NAMES[locale as SiteLocale] ?? locale} (${locale}).`,
-                        weightUnit
-                            ? `Weight unit: ${weightUnit}.`
-                            : "Weight unit: not set. Weights display in kg by default, and logging requires an explicit unit ('kg' or 'lb').",
-                        lengthUnit
-                            ? `Length unit: ${lengthUnit}.`
-                            : "Length unit: not set. Body measurements display in the unit each was entered in, and logging one needs an explicit unit ('cm' or 'in').",
-                        widgetsEnabled
-                            ? "Widgets: enabled. Supported tools show a visual widget alongside their text."
-                            : "Widgets: disabled. Supported tools return text and data only.",
-                        alcoholEnabled
-                            ? `Alcohol tracking: enabled, displayed in grams alongside ${drinkUnitLabel(drinkUnit)}${preferredDrinkUnitFromProfile(profile) ? "" : " (the default — no preference saved)"}.`
-                            : "Alcohol tracking: disabled, so alcohol is hidden from meals, goals and progress. Alcohol already stored is kept, and anything logged with alcohol_g while it is off is still stored. The exception is the file importer, which skips a file's alcohol column while tracking is off and will not backfill it on a later re-import — so tracking has to be on before importing an export whose alcohol the user wants to keep. The user can enable it with set_alcohol_tracking.",
-                        activityCreditLine(profile),
-                        healthSyncProfileLine(healthSync, tz ?? "UTC"),
-                        healthActivityProfileLine(activitySync, tz ?? "UTC"),
-                    ].filter((l): l is string => l !== null);
+                const lines = [
+                    tz === null
+                        ? `Timezone: not set (defaulting to UTC). ${formatClockLine("UTC")} The user can set one with set_timezone so 'today' matches their local calendar day.`
+                        : `Timezone: ${tz}. ${formatClockLine(tz)}`,
+                    locale === null
+                        ? "Language: not set (defaulting to English). The user can choose one with set_language."
+                        : `Language: ${LOCALE_NAMES[locale as SiteLocale] ?? locale} (${locale}).`,
+                    weightUnit
+                        ? `Weight unit: ${weightUnit}.`
+                        : "Weight unit: not set. Weights display in kg by default, and logging requires an explicit unit ('kg' or 'lb').",
+                    lengthUnit
+                        ? `Length unit: ${lengthUnit}.`
+                        : "Length unit: not set. Body measurements display in the unit each was entered in, and logging one needs an explicit unit ('cm' or 'in').",
+                    widgetsEnabled
+                        ? "Widgets: enabled. Supported tools show a visual widget alongside their text."
+                        : "Widgets: disabled. Supported tools return text and data only.",
+                    alcoholEnabled
+                        ? `Alcohol tracking: enabled, displayed in grams alongside ${drinkUnitLabel(drinkUnit)}${preferredDrinkUnitFromProfile(profile) ? "" : " (the default — no preference saved)"}.`
+                        : "Alcohol tracking: disabled, so alcohol is hidden from meals, goals and progress. Alcohol already stored is kept, and anything logged with alcohol_g while it is off is still stored. The exception is the file importer, which skips a file's alcohol column while tracking is off and will not backfill it on a later re-import — so tracking has to be on before importing an export whose alcohol the user wants to keep. The user can enable it with set_alcohol_tracking.",
+                    activityCreditLine(profile),
+                    healthSyncProfileLine(healthSync, tz ?? "UTC"),
+                    healthActivityProfileLine(activitySync, tz ?? "UTC"),
+                ].filter((l): l is string => l !== null);
 
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: lines.join("\n"),
-                            },
-                        ],
-                    };
-                },
-            );
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: lines.join("\n"),
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8901,25 +8735,22 @@ export function registerTools(
             }),
         },
         async ({ timezone }) => {
-            return runTool(
-                "set_timezone",
-                async () => {
-                    if (!validateTz(timezone)) {
-                        throw new ToolError(
-                            `Invalid timezone: ${timezone}. Use an IANA identifier like 'America/Los_Angeles' or 'Europe/London'.`,
-                        );
-                    }
-                    await upsertProfile(userId, { timezone });
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Timezone set to ${timezone}. Local today is ${todayInTz(timezone)}.`,
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_timezone", async () => {
+                if (!validateTz(timezone)) {
+                    throw new ToolError(
+                        `Invalid timezone: ${timezone}. Use an IANA identifier like 'America/Los_Angeles' or 'Europe/London'.`,
+                    );
+                }
+                await upsertProfile(userId, { timezone });
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Timezone set to ${timezone}. Local today is ${todayInTz(timezone)}.`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8944,25 +8775,22 @@ export function registerTools(
             }),
         },
         async ({ locale }) => {
-            return runTool(
-                "set_language",
-                async () => {
-                    if (!SITE_LOCALES.includes(locale as SiteLocale)) {
-                        throw new ToolError(
-                            `Unsupported language: ${locale}. Use one of: ${SITE_LOCALES.join(", ")}.`,
-                        );
-                    }
-                    await upsertProfile(userId, { locale });
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Widget language set to ${LOCALE_NAMES[locale as SiteLocale]} (${locale}).`,
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("set_language", async () => {
+                if (!SITE_LOCALES.includes(locale as SiteLocale)) {
+                    throw new ToolError(
+                        `Unsupported language: ${locale}. Use one of: ${SITE_LOCALES.join(", ")}.`,
+                    );
+                }
+                await upsertProfile(userId, { locale });
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `Widget language set to ${LOCALE_NAMES[locale as SiteLocale]} (${locale}).`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -8977,7 +8805,7 @@ export function registerTools(
         {
             title: "Get Current Time",
             description:
-                "Get the current date and time in the user's timezone as saved in this nutrition tracker, plus the UTC instant. Use it to resolve 'today', 'this morning', 'an hour ago' or 'last Monday' into a timestamp for entries logged here, instead of asking the user or guessing. Not needed to log something that is happening now: omit logged_at and the server stamps the current time itself.",
+                "Get the current date and time in the user's timezone as saved in this nutrition log, plus the UTC instant. Use it to resolve 'today', 'this morning', 'an hour ago' or 'last Monday' into a timestamp for entries logged here, instead of asking the user or guessing. Not needed to log something that is happening now: omit logged_at and the server stamps the current time itself.",
             annotations: {
                 title: "Get Current Time",
                 readOnlyHint: true,
@@ -8987,26 +8815,23 @@ export function registerTools(
             },
         },
         async () => {
-            return runTool(
-                "get_current_time",
-                async () => {
-                    const configuredTz = timezoneFromProfile(
-                        await getProfile(userId),
-                    );
-                    const unset =
-                        configuredTz !== null
-                            ? ""
-                            : " No timezone is set for this account, so this is UTC and may not be the user's actual local time — set_timezone sets it.";
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `${formatClockLine(configuredTz ?? "UTC")}${unset}`,
-                            },
-                        ],
-                    };
-                },
-            );
+            return runTool("get_current_time", async () => {
+                const configuredTz = timezoneFromProfile(
+                    await getProfile(userId),
+                );
+                const unset =
+                    configuredTz !== null
+                        ? ""
+                        : " No timezone is set for this account, so this is UTC and may not be the user's actual local time — set_timezone sets it.";
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `${formatClockLine(configuredTz ?? "UTC")}${unset}`,
+                        },
+                    ],
+                };
+            });
         },
     );
 
@@ -9032,34 +8857,31 @@ export function registerTools(
             }),
         },
         async ({ confirm }) => {
-            return runTool(
-                "delete_account",
-                async () => {
-                    if (!confirm) {
-                        return {
-                            content: [
-                                {
-                                    type: "text",
-                                    text: "Account deletion cancelled. No data was removed.",
-                                },
-                            ],
-                        };
-                    }
-                    await deleteAllUserData(userId);
-                    // Export archives are files outside the database, so they
-                    // are removed separately (the database delete is one
-                    // transaction; this cannot be part of it).
-                    removeAllExports();
+            return runTool("delete_account", async () => {
+                if (!confirm) {
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: "Your account and all associated data have been permanently deleted.",
+                                text: "Account deletion cancelled. No data was removed.",
                             },
                         ],
                     };
-                },
-            );
+                }
+                await deleteAllUserData(userId);
+                // Export archives are files outside the database, so they
+                // are removed separately (the database delete is one
+                // transaction; this cannot be part of it).
+                removeAllExports();
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: "Your account and all associated data have been permanently deleted.",
+                        },
+                    ],
+                };
+            });
         },
     );
 }

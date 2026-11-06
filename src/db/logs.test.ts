@@ -274,10 +274,16 @@ describe("body measurements", () => {
     });
 
     test("notes are decoded BEFORE the dedupe digest is computed", async () => {
-        const a = await insertBodyMeasurement(USER, { ...waist, notes: "after\\u0041" });
+        const a = await insertBodyMeasurement(USER, {
+            ...waist,
+            notes: "after\\u0041",
+        });
         expect(a.entry.notes).toBe("afterA");
         // The same note typed already-decoded is the same measurement.
-        const b = await insertBodyMeasurement(USER, { ...waist, notes: "afterA" });
+        const b = await insertBodyMeasurement(USER, {
+            ...waist,
+            notes: "afterA",
+        });
         expect(b.deduplicated).toBe(true);
         expect(b.entry.id).toBe(a.entry.id);
     });

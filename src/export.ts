@@ -1135,11 +1135,7 @@ export async function exportAllData(
 
     // Nothing stored at all: hand back empty counts and no link rather than
     // writing bare headers and a README.
-    if (
-        Object.values(counts).every((n) => n === 0) &&
-        !goals &&
-        !profile
-    ) {
+    if (Object.values(counts).every((n) => n === 0) && !goals && !profile) {
         return { counts, goals: false, profile: false };
     }
 

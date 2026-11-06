@@ -1229,8 +1229,7 @@ describe("POST /revoke", () => {
     });
 });
 
-describe("logging", () => {
-});
+describe("logging", () => {});
 
 describe("activity shortcut", () => {
     const ACTIVITY_TOKEN = `nmhs_${"z".repeat(43)}`;

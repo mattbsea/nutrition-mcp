@@ -48,10 +48,7 @@ const healthSyncBuckets = new Map<string, number[]>();
 setInterval(() => {
     const now = Date.now();
     const cutoff = now - WINDOW_MS;
-    for (const map of [
-        buckets,
-        healthSyncBuckets,
-    ]) {
+    for (const map of [buckets, healthSyncBuckets]) {
         for (const [key, timestamps] of map) {
             const last = timestamps[timestamps.length - 1];
             if (last == null || last < cutoff) {

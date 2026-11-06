@@ -1,16 +1,9 @@
 name: CI
 
-# Runs on every pull request and on every push to main. Merging to main is the
-# release — DigitalOcean auto-deploys it — so this is the last gate before a
-# change reaches clients at https://nutrition-mcp.com/mcp.
-#
-# The format check keeps the tree prettier-clean, which is what makes
-# `bun run format` safe to run: it only ever touches files you actually edited.
-
 on:
     pull_request:
     push:
-        branches: ["main"]
+        branches: ["main", "ha-addon"]
 
 jobs:
     check:
@@ -22,12 +15,13 @@ jobs:
 
             - name: Set up Bun
               uses: oven-sh/setup-bun@v2
+              with:
+                  # Pinned to the release the Dockerfile and the SQLite layer
+                  # were built and tested with.
+                  bun-version: 1.4.4
 
             - name: Install dependencies
               run: bun install --frozen-lockfile
-
-            - name: Generate public/ pages
-              run: bun run gen:all
 
             - name: Check formatting
               run: bun run format:check
