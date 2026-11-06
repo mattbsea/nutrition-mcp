@@ -1,6 +1,0 @@
-User-agent: *
-Allow: /
-Disallow: /api/
-Disallow: /mcp
-
-Sitemap: https://nutrition-mcp.com/sitemap.xml

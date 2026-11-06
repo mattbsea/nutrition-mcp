@@ -13,7 +13,7 @@ import type {
     NutritionGoals,
     WaterEntry,
     WeightEntry,
-} from "./supabase.js";
+} from "./db/repo.js";
 
 // "Now" is Sat 24 Oct 2026, 17:40 in Kyiv (UTC+3 in October 2026: DST ends
 // on the 25th), so local days are visibly not UTC days.

@@ -27,7 +27,7 @@ import {
 } from "./usda.js";
 import { errorLogText, UpstreamError } from "./errors.js";
 import { categorizeError } from "./analytics.js";
-import { readUsdaFoodCache, writeUsdaFoodCache } from "./supabase.js";
+import { readUsdaFoodCache, writeUsdaFoodCache } from "./db/repo.js";
 import { formatUsdaRecord } from "./usda-text.js";
 import {
     usdaRecordFromPayload,

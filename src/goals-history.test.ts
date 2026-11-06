@@ -1,3 +1,4 @@
+import { openDb } from "./db/migrate.js";
 import { test, expect, describe } from "bun:test";
 import {
     GOAL_COLUMNS,
@@ -248,42 +249,34 @@ describe("added-sugar goal column", () => {
     });
 });
 
-// The added-sugar migration must create every column the code writes; a
-// rename or a dropped column would otherwise only surface as a failed insert
-// in production.
-test("the added-sugar migration adds the columns the code writes", async () => {
-    const read = (name: string) =>
-        Bun.file(
-            new URL(`../supabase/migrations/${name}`, import.meta.url),
-        ).text();
-    const sql = (await read("20261006120000_added_sugar.sql")).replace(
-        /\s+/g,
-        " ",
-    );
-    const history = await read("20261005120000_nutrition_goals_history.sql");
-
-    expect(sql).toContain(
-        "alter table public.meals add column if not exists added_sugar_g numeric check (added_sugar_g >= 0);",
-    );
-    for (const table of ["nutrition_goals", "nutrition_goals_history"]) {
-        expect(sql).toContain(
-            `alter table public.${table} add column if not exists daily_added_sugar_g numeric(6, 2) check (daily_added_sugar_g >= 0);`,
-        );
+// The schema must hold every column the code writes; a rename or a dropped
+// column would otherwise only surface as a failed insert at runtime.
+const columnsOf = (table: string): string[] => {
+    const db = openDb(":memory:");
+    try {
+        return db
+            .query<{ name: string }, []>(`PRAGMA table_info(${table})`)
+            .all()
+            .map((c) => c.name);
+    } finally {
+        db.close();
     }
-    // Every goal column the history table did not start with comes from one of
-    // the migrations that followed it (added sugar, saturated fat, sodium).
-    const later =
-        sql +
-        (await read("20261010150000_saturated_trans_fat.sql")) +
-        (await read("20261024120000_sodium.sql"));
-    const added = GOAL_COLUMNS.filter(
-        (c) => !new RegExp(`\\b${c}\\b`).test(history),
-    );
-    expect(added.length).toBeGreaterThan(0);
-    for (const c of added) expect(later).toMatch(new RegExp(`\\b${c}\\b`));
+};
+
+test("the schema holds every goal column in both goal tables, and meals.added_sugar_g", () => {
+    expect(columnsOf("meals")).toContain("added_sugar_g");
+    for (const table of ["nutrition_goals", "nutrition_goals_history"]) {
+        const cols = columnsOf(table);
+        for (const c of GOAL_COLUMNS) expect(cols).toContain(c);
+    }
 });
 
 describe("saturated-fat goal column", () => {
+    test("both goal tables hold daily_saturated_fat_g", () => {
+        for (const table of ["nutrition_goals", "nutrition_goals_history"])
+            expect(columnsOf(table)).toContain("daily_saturated_fat_g");
+    });
+
     test("sits right after daily_fat_g in GOAL_COLUMNS", () => {
         const cols: readonly string[] = GOAL_COLUMNS;
         const fat = cols.indexOf("daily_fat_g");
@@ -309,20 +302,4 @@ describe("saturated-fat goal column", () => {
             ),
         ).toBe(false);
     });
-});
-
-test("the saturated-fat migration adds the goal column to both goal tables", async () => {
-    const sql = (
-        await Bun.file(
-            new URL(
-                "../supabase/migrations/20261010150000_saturated_trans_fat.sql",
-                import.meta.url,
-            ),
-        ).text()
-    ).replace(/\s+/g, " ");
-    for (const table of ["nutrition_goals", "nutrition_goals_history"]) {
-        expect(sql).toContain(
-            `alter table public.${table} add column if not exists daily_saturated_fat_g numeric(6, 2) check (daily_saturated_fat_g >= 0);`,
-        );
-    }
 });

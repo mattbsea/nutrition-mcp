@@ -47,13 +47,13 @@ import type {
     ToolAnalyticsRow,
     WaterEntry,
     WeightEntry,
-} from "./supabase.js";
+} from "./db/repo.js";
 import {
     getAllBodyMeasurements,
     getAllOAuthGrants,
     getAllToolAnalytics,
     getAuthAccount,
-} from "./supabase.js";
+} from "./db/repo.js";
 import { buildZip } from "./zip.js";
 
 function meal(overrides: Partial<Meal> = {}): Meal {

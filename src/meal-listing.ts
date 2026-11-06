@@ -13,7 +13,7 @@
 // the full notes. A raw UTC time was also a correctness risk rather than just
 // bulk: a Kyiv user's 21:00 dinner read as 19:00Z (compare #68).
 
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 import { formatAlcohol, type DrinkUnit } from "./alcohol.js";
 import {
     compactSugarFigure,

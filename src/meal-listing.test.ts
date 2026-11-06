@@ -5,7 +5,7 @@ import {
     renderMealListing,
     MEAL_LISTING_MAX_CHARS,
 } from "./meal-listing.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 import { validateItems } from "./meal-items.js";
 
 const ID = "00000000-0000-4000-8000-0000000000aa";

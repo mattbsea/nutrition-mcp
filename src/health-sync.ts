@@ -15,7 +15,7 @@
 // reuse the zero-filling `sumMeals` / `totalsPayloadOf`: here a nutrient no
 // meal carries is null and is never sent, while a real 0 is a value.
 
-import type { Meal, WaterEntry } from "./supabase.js";
+import type { Meal, WaterEntry } from "./db/repo.js";
 import {
     dateInTz,
     formatLocalDateTime,

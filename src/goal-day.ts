@@ -1,5 +1,5 @@
 import type { MealItemValues } from "./meal-items.js";
-import type { Meal, WaterEntry } from "./supabase.js";
+import type { Meal, WaterEntry } from "./db/repo.js";
 import { localClock } from "./meal-times.js";
 
 /**

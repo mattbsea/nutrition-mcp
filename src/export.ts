@@ -1,5 +1,4 @@
 import {
-    getSupabase,
     exportArchivePath,
     getAllMeals,
     getAllMealItems,
@@ -9,38 +8,29 @@ import {
     getAllActiveCalories,
     getAllWeight,
     getAllBodyMeasurements,
-    getAllOAuthGrants,
-    getAllToolAnalytics,
-    getAuthAccount,
     getNutritionGoals,
     getNutritionGoalsHistory,
     getProfile,
     timezoneFromProfile,
+    createSqliteHealthActivityLinkStore,
+    createSqliteHealthSyncStore,
     type BodyMeasurementEntry,
-    type Meal,
-    type NutritionGoals,
-    type OAuthGrantRow,
-    type Profile,
-    type ToolAnalyticsRow,
-    type WaterEntry,
-    type WeightEntry,
-} from "./supabase.js";
-import type { User } from "@supabase/supabase-js";
-import type { NutritionGoalsHistoryRow } from "./goals-history.js";
-import {
-    HEALTH_SYNC_CLIENT_ID,
-    HEALTH_SYNC_FIELDS,
-    HEALTH_SYNC_RETENTION_DAYS,
-} from "./health-sync.js";
-import {
-    createSupabaseHealthActivityLinkStore,
-    createSupabaseHealthSyncStore,
     type HealthActivityLinkStatus,
     type HealthActivityLinkStore,
     type HealthSyncDayRow,
     type HealthSyncLinkStatus,
     type HealthSyncStore,
-} from "./health-sync-store.js";
+    type Meal,
+    type NutritionGoals,
+    type Profile,
+    type WaterEntry,
+    type WeightEntry,
+} from "./db/repo.js";
+import type { NutritionGoalsHistoryRow } from "./goals-history.js";
+import {
+    HEALTH_SYNC_FIELDS,
+    HEALTH_SYNC_RETENTION_DAYS,
+} from "./health-sync.js";
 import {
     PROVENANCE_EXPORT_VERSION,
     type NutrientSources,
@@ -50,11 +40,12 @@ import { formatLocalDateTime, validateTz } from "./tz.js";
 import { creditedKcal, type ActivityEntry } from "./activity.js";
 import { fromGrams, isWeightUnit, type WeightUnit } from "./units.js";
 import { buildZip, type ZipEntry } from "./zip.js";
-
-const EXPORT_BUCKET = "exports";
-// Signed link lifetime. The cleanup sweep ages files out on the same horizon.
-const EXPORT_TTL_SECONDS = 60 * 60; // 60 minutes
-const SWEEP_INTERVAL_MS = 10 * 60 * 1000; // every 10 minutes
+import { getKeys } from "./keys.js";
+import {
+    EXPORT_TTL_SECONDS,
+    signExportLink,
+    writeExportArchive,
+} from "./export-files.js";
 
 /**
  * The provenance columns every nutrient-bearing file ends with. Each row of this
@@ -793,172 +784,18 @@ export function buildProfileCsv(profile: Profile | null, tz: string): string {
 }
 
 /**
- * Column order for account.csv. Parallel array with the row builder below.
- *
- * One `account` row, then one `identity` row per sign-in method linked to the
- * account (email/password, Google). The account row's profile claims come
- * from the account's user metadata; an identity row's from what that provider
- * sent. Google accounts created before 2026-09-27 still hold a name and a
- * picture URL there, which the privacy policy discloses — so they are
- * exported, not filtered. There is no password or token column: the Auth
- * admin API never returns a password hash, and nothing here needs a token.
- */
-const ACCOUNT_CSV_COLUMNS = [
-    "record",
-    "user_id",
-    "email",
-    "created_at",
-    "email_confirmed_at",
-    "last_sign_in_at",
-    "timezone",
-    "sign_in_methods",
-    "provider",
-    "provider_account_id",
-    "name",
-    "full_name",
-    "picture",
-    "avatar_url",
-] as const;
-
-/** A profile claim as text, or null when absent or not a plain value. */
-function claim(
-    source: Record<string, unknown> | undefined,
-    key: string,
-): string | null {
-    const v = source?.[key];
-    return typeof v === "string" || typeof v === "number" ? String(v) : null;
-}
-
-function signInMethods(user: User): string {
-    const listed = user.app_metadata?.providers;
-    const methods = Array.isArray(listed)
-        ? listed.map(String)
-        : [
-              ...(user.app_metadata?.provider
-                  ? [String(user.app_metadata.provider)]
-                  : []),
-              ...(user.identities ?? []).map((i) => i.provider),
-          ];
-    return [...new Set(methods)].join(";");
-}
-
-/**
- * Build account.csv from the Supabase Auth record. Header-only when Auth has
- * no user for this id.
- */
-export function buildAccountCsv(user: User | null, tz: string): string {
-    const rows = [ACCOUNT_CSV_COLUMNS.join(",")];
-    if (!user) return rows.join("\n");
-    const meta = user.user_metadata as Record<string, unknown> | undefined;
-    rows.push(
-        [
-            csvEscape("account"),
-            csvEscape(user.id),
-            csvEscape(user.email),
-            csvEscape(localOrNull(user.created_at, tz)),
-            csvEscape(localOrNull(user.email_confirmed_at, tz)),
-            csvEscape(localOrNull(user.last_sign_in_at, tz)),
-            csvEscape(tz),
-            csvEscape(signInMethods(user)),
-            csvEscape(null),
-            csvEscape(null),
-            csvEscape(claim(meta, "name")),
-            csvEscape(claim(meta, "full_name")),
-            csvEscape(claim(meta, "picture")),
-            csvEscape(claim(meta, "avatar_url")),
-        ].join(","),
-    );
-    for (const identity of user.identities ?? []) {
-        const data = identity.identity_data as
-            Record<string, unknown> | undefined;
-        rows.push(
-            [
-                csvEscape("identity"),
-                csvEscape(user.id),
-                csvEscape(claim(data, "email")),
-                csvEscape(localOrNull(identity.created_at, tz)),
-                csvEscape(null),
-                csvEscape(localOrNull(identity.last_sign_in_at, tz)),
-                csvEscape(tz),
-                csvEscape(null),
-                csvEscape(identity.provider),
-                // The provider's own id for you (Google's account id; for
-                // email sign-in, the account id again).
-                csvEscape(identity.id),
-                csvEscape(claim(data, "name")),
-                csvEscape(claim(data, "full_name")),
-                csvEscape(claim(data, "picture")),
-                csvEscape(claim(data, "avatar_url")),
-            ].join(","),
-        );
-    }
-    return rows.join("\n");
-}
-
-/**
- * Column order for telemetry.csv. Parallel array with the row builder below.
- * Every tool_analytics column except user_id, which is the account id on
- * every row (account.csv already carries it).
- */
-const TELEMETRY_CSV_COLUMNS = [
-    "id",
-    "invoked_at",
-    "timezone",
-    "tool_name",
-    "success",
-    "duration_ms",
-    "error_category",
-    "date_range_days",
-    "mcp_session_id",
-    "protocol_era",
-    "client_name",
-    "created_at",
-] as const;
-
-/** Build telemetry.csv: one row per recorded tool call, oldest first. */
-export function buildTelemetryCsv(
-    rows: ToolAnalyticsRow[],
-    tz: string,
-): string {
-    const out = [TELEMETRY_CSV_COLUMNS.join(",")];
-    for (const r of rows) {
-        out.push(
-            [
-                csvEscape(r.id),
-                csvEscape(localOrNull(r.invoked_at, tz)),
-                csvEscape(tz),
-                csvEscape(r.tool_name),
-                csvEscape(r.success),
-                csvEscape(r.duration_ms),
-                csvEscape(r.error_category),
-                csvEscape(r.date_range_days),
-                csvThirdParty(r.mcp_session_id),
-                csvEscape(r.protocol_era),
-                csvThirdParty(r.client_name),
-                csvEscape(localOrNull(r.created_at, tz)),
-            ].join(","),
-        );
-    }
-    return out.join("\n");
-}
-
-/**
  * Column order for connections.csv. Parallel array with the row builder
- * below. No token, code, hash or PKCE column, by design: those are stored
- * only as hashes of secrets, and the export is a copy of your data, not a set
- * of credentials.
+ * below. No token or hash column, by design: link tokens are stored only as
+ * hashes, and the export is a copy of your data, not a set of credentials.
  *
- * The OAuth grants fill the first seven columns. The Apple Health sync link
- * (one row of kind `health_sync`, at most) also fills the rest: when it was
- * last used and last synced, which totals it sends, the first day it may send
- * and the phone's own timezone, which is a stored setting and NOT the zone the
- * timestamps here are rendered in — that one is `timezone`, as everywhere.
+ * One row per Apple Health shortcut link (at most one of each kind): when it
+ * was created, last used and last synced, which totals it sends, the first day
+ * it may send and the phone's own timezone, which is a stored setting and NOT
+ * the zone the timestamps here are rendered in (that one is `timezone`).
  */
 const CONNECTIONS_CSV_COLUMNS = [
     "kind",
-    "client_id",
-    "client_name",
-    "redirect_uri",
+    "name",
     "created_at",
     "expires_at",
     "last_used_at",
@@ -969,53 +806,25 @@ const CONNECTIONS_CSV_COLUMNS = [
     "device_timezone",
 ] as const;
 
-/** What connections.csv calls the Apple Health sync link. Our own text, not a
- *  registrant's, so it needs no formula defusing. */
+/** What connections.csv calls the Apple Health sync link. */
 const HEALTH_SYNC_CONNECTION_NAME = "Apple Health sync (iOS Shortcut)";
 
 /** What connections.csv calls the activity shortcut's link. */
 const HEALTH_ACTIVITY_CONNECTION_NAME =
     "Apple Health activity sync (iOS Shortcut)";
 
-/**
- * Build connections.csv: every stored OAuth grant for the account, then the
- * Apple Health sync link when there is one. The link's token is stored only as
- * a hash and is never exported, like every other token here.
- */
+/** Build connections.csv: the Apple Health shortcut links that exist. */
 export function buildConnectionsCsv(
-    grants: OAuthGrantRow[],
     tz: string,
     healthSync: HealthSyncLinkStatus | null = null,
     activitySync: HealthActivityLinkStatus | null = null,
 ): string {
     const out = [CONNECTIONS_CSV_COLUMNS.join(",")];
-    for (const g of grants) {
-        out.push(
-            [
-                csvEscape(g.kind),
-                csvEscape(g.client_id),
-                csvThirdParty(g.client_name),
-                csvThirdParty(g.redirect_uri),
-                csvEscape(localOrNull(g.created_at, tz)),
-                csvEscape(localOrNull(g.expires_at, tz)),
-                // Grants record no use or sync time, and none of the link's
-                // settings apply to them: empty, not zero.
-                "",
-                "",
-                csvEscape(tz),
-                "",
-                "",
-                "",
-            ].join(","),
-        );
-    }
     if (healthSync) {
         out.push(
             [
                 csvEscape("health_sync"),
-                csvEscape(HEALTH_SYNC_CLIENT_ID),
                 csvEscape(HEALTH_SYNC_CONNECTION_NAME),
-                "",
                 csvEscape(localOrNull(healthSync.created_at, tz)),
                 csvEscape(localOrNull(healthSync.expires_at, tz)),
                 csvEscape(localOrNull(healthSync.last_used_at, tz)),
@@ -1031,9 +840,7 @@ export function buildConnectionsCsv(
         out.push(
             [
                 csvEscape("health_activity_sync"),
-                csvEscape(HEALTH_SYNC_CLIENT_ID),
                 csvEscape(HEALTH_ACTIVITY_CONNECTION_NAME),
-                "",
                 csvEscape(localOrNull(activitySync.created_at, tz)),
                 csvEscape(localOrNull(activitySync.expires_at, tz)),
                 csvEscape(localOrNull(activitySync.last_used_at, tz)),
@@ -1114,8 +921,6 @@ export const EXPORT_ARCHIVE_FILES = [
     "goals.csv",
     "goals_history.csv",
     "profile.csv",
-    "account.csv",
-    "telemetry.csv",
     "connections.csv",
     "health_sync.csv",
     "README.txt",
@@ -1144,8 +949,8 @@ export function buildExportReadme(opts: {
     // own wall clocks back needs to know whether the times they are looking at
     // are theirs or UTC's before they interpret a single one of them.
     const tzNote = tzConfigured
-        ? `Every timestamp in this archive is a local wall clock in ${tz}, the timezone set on your account, except in health_sync.csv (see below). Each file repeats it in a "timezone" column so no file has to be read next to this one.`
-        : `No timezone has ever been set on this account, so every timestamp in this archive is expressed in UTC (that is also what the server assumes when it buckets your days), except in health_sync.csv (see below). Set one with set_timezone and export again if you want your own wall clock. Each file repeats the zone in a "timezone" column.`;
+        ? `Every timestamp in this archive is a local wall clock in ${tz}, the timezone set in your profile, except in health_sync.csv (see below). Each file repeats it in a "timezone" column so no file has to be read next to this one.`
+        : `No timezone has ever been set, so every timestamp in this archive is expressed in UTC (that is also what the server assumes when it buckets your days), except in health_sync.csv (see below). Set one with set_timezone and export again if you want your own wall clock. Each file repeats the zone in a "timezone" column.`;
 
     return [
         "Nutrition MCP — full data export",
@@ -1168,9 +973,7 @@ export function buildExportReadme(opts: {
         "goals.csv    your current daily targets — one row, or a header alone if you have never set goals.",
         `goals_history.csv ${rows(counts.goalsHistory)} — every change to your daily targets, oldest first: when the new values took effect (effective_at) and the targets from then on, in the same columns and units as goals.csv. Goals set before this history was kept appear once, as of their last change.`,
         "profile.csv  your settings: timezone, preferred weight, length and drink units (empty preferred_length_unit = never chosen), display toggles, widget language and activity_credit_pct (the share of active calories that counts against intake for entries logged from now on; empty = never chosen, which counts as 100) — one row, or a header alone if you have no profile yet. An empty locale means no widget language was ever chosen, so widgets use English.",
-        'account.csv  your sign-in account: one "account" row (account id, email address, when the account was created, when the email was confirmed, last sign-in, sign-in methods) and one "identity" row per sign-in method (the provider, the provider\'s id for you, and any name or picture it sent — Google accounts created before September 27, 2026 may still hold them).',
-        `telemetry.csv ${rows(counts.telemetry)} — one per tool call your AI app made: which tool, when, whether it succeeded, how long it took, the error category if it failed, the date-range length asked for, the MCP session id, the protocol revision and the app name it reported. None of it contains what you logged.`,
-        `connections.csv ${rows(counts.connections)} — the sign-in grants that keep your AI apps connected: each access token, refresh token and pending authorization code, with the app it was issued to where recorded, when it was issued and when it expires. The tokens themselves are not included — we store them only as one-way hashes. Access tokens do not record which app they belong to, so their client columns are empty. If Apple Health sync is connected, its link is one more row of kind "health_sync": when it was created, last used and last synced, when it expires, which totals it sends (synced_fields), the first day it may send (sync_start_date) and the iPhone's own timezone (device_timezone, a saved setting — the timestamps are still in the "timezone" column's zone). Its token is not included either. If the Nutrition MCP Activity shortcut is connected, its link is a row of kind "health_activity_sync" with the same dates and device_timezone; it sends nothing to Apple Health, so synced_fields and sync_start_date are empty, and its token is not included.`,
+        `connections.csv ${rows(counts.connections)} — the Apple Health shortcut links, if any: when each was created, last used and last synced, when it expires and, for the Health shortcut, which totals it sends (synced_fields), the first day it may send (sync_start_date) and the iPhone's own timezone (device_timezone, a saved setting — the timestamps are still in the "timezone" column's zone). The Activity shortcut's row sends nothing to Apple Health, so synced_fields and sync_start_date are empty. No link token is included.`,
         `health_sync.csv ${rows(counts.healthSync)} — what Apple Health sync sent to your iPhone, one row per day, kept for ${HEALTH_SYNC_RETENTION_DAYS} days: the daily totals sent (${HEALTH_SYNC_FIELDS.join(", ")}), how many later top-ups were sent for the day (topup_seq) and when the first and last were sent. Each row is in its own "timezone" — the zone the day was counted in, which can differ from your account's if your phone was elsewhere — and its date and times are wall clocks there. An empty value was not sent; a row with no values was offered but not yet confirmed by the phone. Alcohol is never sent.`,
         "README.txt   this file.",
         "",
@@ -1198,17 +1001,15 @@ export function buildExportReadme(opts: {
         "Re-importing",
         "------------",
         "Only meals.csv can be read back in. Hand it to start_meal_import (which parses it in your browser) or to bulk_import_meals; its column names are exactly the ones the importer expects, and re-importing the same file twice is a no-op rather than a set of duplicates.",
-        "Every other file is export-only — there is no import path for meal ingredients, saved meals, water, active calories, weight, body measurements, goals, profile, account, telemetry, connections or Apple Health sync, so keep this archive if you want that history back.",
+        "Every other file is export-only — there is no import path for meal ingredients, saved meals, water, active calories, weight, body measurements, goals, profile, connections or Apple Health sync, so keep this archive if you want that history back.",
         "",
         "Not in this archive",
         "-------------------",
-        "This archive holds everything the service stores about you. What is not in it:",
-        "  * the server runtime log — a short rolling buffer of requests that does not contain your account id or email, so it cannot be looked up by account;",
-        "  * our providers' own short-lived operational logs (including the sign-in provider's audit records) and their rolling backups, which age out on their own schedule;",
-        "  * values kept only as one-way hashes for security: your password (held by the sign-in provider, which never returns it) and your tokens and sign-in codes, including the Apple Health sync token (which also sits, unhashed, in the shortcut on your own devices);",
-        "  * internal bookkeeping: the de-duplication keys stored beside meals, water, active calories, weight and body measurement entries, the PKCE challenge of a pending sign-in, and Apple Health sync's lock against two syncs at once, its per-day count of how often a day was offered and its record of which notices were shown;",
-        "  * a pending Apple Health sync connect request, which lasts at most 30 minutes and is deleted once the shortcut finishes connecting;",
-        "  * a sign-in session record at our sign-in provider (IP address and browser), if one was ever left behind after sign-in; it is deleted with your account.",
+        "This archive holds everything this server stores about you. What is not in it:",
+        "  * the server runtime log — a short rolling buffer of requests that contains no meal data and never an access key;",
+        "  * values kept only as one-way hashes for security: the Apple Health shortcut link tokens (which also sit, unhashed, in the shortcuts on your own devices);",
+        "  * internal bookkeeping: the de-duplication keys stored beside meals, water, active calories, weight and body measurement entries, and Apple Health sync's lock against two syncs at once, its per-day count of how often a day was offered and its record of which notices were shown;",
+        "  * a pending Apple Health sync connect request, if one exists, which lasts at most 30 minutes.",
         "",
     ].join("\n");
 }
@@ -1228,8 +1029,7 @@ export interface ExportCounts {
     bodyMeasurements: number;
     /** Rows in goals_history.csv. */
     goalsHistory: number;
-    telemetry: number;
-    /** OAuth grants plus the Apple Health sync link row, when there is one. */
+    /** Apple Health shortcut link rows (at most one of each kind). */
     connections: number;
     /** Days in health_sync.csv. */
     healthSync: number;
@@ -1239,42 +1039,44 @@ export interface FullExportResult {
     counts: ExportCounts;
     goals: boolean;
     profile: boolean;
-    account: boolean;
-    /** Absent only when the account has nothing at all to export. */
+    /** Signed download path+query, valid for EXPORT_TTL_SECONDS. Absent only
+     *  when there is nothing at all to export. */
+    path?: string;
+    /** Public URL for `path` when PUBLIC_URL is configured, else `path`. */
     url?: string;
 }
 
 /**
- * Build the whole-account archive — every log (meals and their ingredients,
- * saved meals and their ingredients, water, weight and body measurements), the
- * goals and their history, the profile, the
- * Auth account, the tool telemetry, the OAuth grants and the Apple Health sync
- * link with its record of what was sent —
- * upload it to the private `exports` bucket under a fixed per-user path (so
- * each export overwrites the previous one), and return a signed download link
- * valid for EXPORT_TTL_SECONDS. This is the only export path: a meals-only CSV
- * tool used to sit beside it, and the archive absorbed it, which is why
- * `buildMealsCsv` still emits exactly the columns the importer reads.
+ * Build the whole-data archive — every log (meals and their ingredients, saved
+ * meals and their ingredients, water, weight and body measurements), the goals
+ * and their history, the profile, the Apple Health shortcut links and the
+ * record of what Apple Health sync sent — write it to DATA_DIR/exports under a
+ * fixed per-owner path (so each export overwrites the previous one), and return
+ * a signed download link valid for EXPORT_TTL_SECONDS. This is the only export
+ * path: a meals-only CSV tool used to sit beside it, and the archive absorbed
+ * it, which is why `buildMealsCsv` still emits exactly the columns the importer
+ * reads.
  */
 export async function exportAllData(
     userId: string,
-    // Injectable for tests; every other reader here is a supabase.ts function.
+    // Injectable for tests; every other reader here is a src/db/repo function.
     deps: {
         healthSync?: HealthSyncStore;
         healthActivity?: Pick<HealthActivityLinkStore, "getActivityLinkStatus">;
         getGoalsHistory?: (
             userId: string,
         ) => Promise<NutritionGoalsHistoryRow[]>;
+        /** DATA_DIR override (tests). */
+        dataDir?: string;
+        /** HMAC secret override (tests). */
+        secret?: string;
+        now?: Date;
     } = {},
 ): Promise<FullExportResult> {
-    const healthSync = deps.healthSync ?? createSupabaseHealthSyncStore();
+    const healthSync = deps.healthSync ?? createSqliteHealthSyncStore();
     const healthActivity =
-        deps.healthActivity ?? createSupabaseHealthActivityLinkStore();
+        deps.healthActivity ?? createSqliteHealthActivityLinkStore();
     const getGoalsHistory = deps.getGoalsHistory ?? getNutritionGoalsHistory;
-    // One round of independent queries rather than each awaited in turn: an
-    // account with years of history pages through meals, water, weight and
-    // telemetry, and serialising those pushes the tool past the point where a
-    // host gives up on it.
     const [
         meals,
         mealItems,
@@ -1287,9 +1089,6 @@ export async function exportAllData(
         goals,
         goalsHistory,
         profile,
-        account,
-        telemetry,
-        connections,
         healthSyncLink,
         healthSyncDays,
         activitySyncLink,
@@ -1305,9 +1104,6 @@ export async function exportAllData(
         getNutritionGoals(userId),
         getGoalsHistory(userId),
         getProfile(userId),
-        getAuthAccount(userId),
-        getAllToolAnalytics(userId),
-        getAllOAuthGrants(userId),
         healthSync.getLinkStatus(userId),
         healthSync.getDaysForExport(userId),
         healthActivity.getActivityLinkStatus(userId),
@@ -1323,18 +1119,13 @@ export async function exportAllData(
         weight: weight.length,
         bodyMeasurements: bodyMeasurements.length,
         goalsHistory: goalsHistory.length,
-        telemetry: telemetry.length,
-        connections:
-            connections.length +
-            (healthSyncLink ? 1 : 0) +
-            (activitySyncLink ? 1 : 0),
+        connections: (healthSyncLink ? 1 : 0) + (activitySyncLink ? 1 : 0),
         healthSync: healthSyncDays.length,
     };
 
-    // Both preferences come off the profile row already in hand. The
-    // getUserTimezone / getPreferredWeightUnit wrappers each run their own
-    // `select * from profiles` (src/supabase.ts says so explicitly), so calling
-    // them here would repeat an identical query twice for no new information.
+    // Both preferences come off the profile row already in hand rather than
+    // through the getUserTimezone / getPreferredWeightUnit wrappers, which
+    // would each re-read the profile.
     const configuredTz = timezoneFromProfile(profile);
     const tz = configuredTz ?? "UTC";
     // Display path: coalesce a never-chosen preference to kg rather than
@@ -1344,21 +1135,17 @@ export async function exportAllData(
         ? profile.preferred_weight_unit
         : "kg";
 
-    // Nothing stored at all — not even an Auth account: hand back empty
-    // counts and no link rather than uploading bare headers and a README. Any
-    // data whatsoever — which for a live account always includes account.csv
-    // — produces the full archive, so the shape never depends on which tables
-    // were empty.
+    // Nothing stored at all: hand back empty counts and no link rather than
+    // writing bare headers and a README.
     if (
         Object.values(counts).every((n) => n === 0) &&
         !goals &&
-        !profile &&
-        !account
+        !profile
     ) {
-        return { counts, goals: false, profile: false, account: false };
+        return { counts, goals: false, profile: false };
     }
 
-    const generatedAt = new Date();
+    const generatedAt = deps.now ?? new Date();
     // Keyed by the exported constant, so a file added to the archive without
     // being named in EXPORT_ARCHIVE_FILES (or the reverse) is a type error
     // rather than a README that describes an archive nobody ships.
@@ -1378,10 +1165,7 @@ export async function exportAllData(
         "goals.csv": buildGoalsCsv(goals, tz),
         "goals_history.csv": buildGoalsHistoryCsv(goalsHistory, tz),
         "profile.csv": buildProfileCsv(profile, tz),
-        "account.csv": buildAccountCsv(account, tz),
-        "telemetry.csv": buildTelemetryCsv(telemetry, tz),
         "connections.csv": buildConnectionsCsv(
-            connections,
             tz,
             healthSyncLink,
             activitySyncLink,
@@ -1401,103 +1185,24 @@ export async function exportAllData(
     }));
     const archive = buildZip(entries, generatedAt);
 
-    // Fixed per-user path: each export overwrites the last, so a user cannot
-    // accumulate archives of their whole history in a bucket the sweep only
-    // visits every ten minutes. Shared with deleteAllUserData rather than
-    // spelled out twice — the two drifting apart is how a deleted account left
-    // its archive behind.
-    const path = exportArchivePath(userId);
-    const storage = getSupabase().storage.from(EXPORT_BUCKET);
-
-    const { error: uploadErr } = await storage.upload(path, archive, {
-        contentType: "application/zip",
-        upsert: true,
-    });
-    if (uploadErr)
-        throw new Error(`Failed to upload export: ${uploadErr.message}`);
-
-    const { data, error: signErr } = await storage.createSignedUrl(
-        path,
+    // Fixed per-owner path: each export overwrites the last, so exports cannot
+    // pile up. Shared with delete_account (removeAllExports) and the serve
+    // route rather than spelled out three times.
+    const rel = exportArchivePath(userId);
+    writeExportArchive(rel, archive, deps.dataDir);
+    const { path } = signExportLink(
+        deps.secret ?? getKeys().exportSecret,
+        rel,
+        deps.now ?? new Date(),
         EXPORT_TTL_SECONDS,
     );
-    if (signErr || !data)
-        throw new Error(
-            `Failed to create download link: ${signErr?.message ?? "unknown error"}`,
-        );
+    const publicUrl = process.env.PUBLIC_URL?.replace(/\/+$/, "");
 
     return {
         counts,
         goals: goals !== null,
         profile: profile !== null,
-        account: account !== null,
-        url: data.signedUrl,
+        path,
+        url: publicUrl ? `${publicUrl}${path}` : path,
     };
-}
-
-/**
- * Delete export files older than the link TTL. Runs as a background sweep so no
- * export file outlives its signed URL by more than one sweep interval, even
- * across server restarts and for users who never export again.
- */
-export async function sweepStaleExports(): Promise<void> {
-    const storage = getSupabase().storage.from(EXPORT_BUCKET);
-    const cutoff = Date.now() - EXPORT_TTL_SECONDS * 1000;
-
-    // Files live under per-user folders, so list the root to enumerate folders,
-    // then list each folder to reach the files (with their timestamps).
-    const { data: folders, error: rootErr } = await storage.list("", {
-        limit: 1000,
-    });
-    if (rootErr) {
-        console.warn("Export sweep: failed to list bucket:", rootErr.message);
-        return;
-    }
-    if (!folders) return;
-
-    const stalePaths: string[] = [];
-    for (const folder of folders) {
-        const { data: files, error: listErr } = await storage.list(
-            folder.name,
-            { limit: 1000 },
-        );
-        if (listErr) {
-            // Not the folder name: it is the user id, and the runtime log
-            // must not be linkable to an account (privacy policy).
-            console.warn(
-                "Export sweep: failed to list a user folder:",
-                listErr.message,
-            );
-            continue;
-        }
-        for (const file of files ?? []) {
-            const ts = file.updated_at ?? file.created_at;
-            if (ts && new Date(ts).getTime() < cutoff) {
-                stalePaths.push(`${folder.name}/${file.name}`);
-            }
-        }
-    }
-
-    if (stalePaths.length === 0) return;
-    const { error: removeErr } = await storage.remove(stalePaths);
-    if (removeErr) {
-        console.warn(
-            "Export sweep: failed to remove files:",
-            removeErr.message,
-        );
-        return;
-    }
-    console.log(`Export sweep: removed ${stalePaths.length} stale file(s).`);
-}
-
-let sweepRunning = false;
-
-/** Start the periodic export-cleanup sweep. Call once at server startup. */
-export function startExportCleanup(): void {
-    setInterval(() => {
-        if (sweepRunning) return;
-        sweepRunning = true;
-        sweepStaleExports().finally(() => {
-            sweepRunning = false;
-        });
-    }, SWEEP_INTERVAL_MS);
 }

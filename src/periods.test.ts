@@ -22,7 +22,7 @@ import {
     type DayTotals,
     type Granularity,
 } from "./periods.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 import { shiftLocalDate } from "./tz.js";
 
 function goals(partial: Partial<GoalValues>): GoalValues {

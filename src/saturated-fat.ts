@@ -1,5 +1,5 @@
 import { dayCarries } from "./insights.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 /**
  * Saturated fat: the widget payload under SATURATED_FAT_META_KEY

@@ -1,5 +1,5 @@
 import { test, expect, spyOn } from "bun:test";
-import type { MealInput, MealInsertResult, Meal } from "./supabase.js";
+import type { MealInput, MealInsertResult, Meal } from "./db/repo.js";
 import {
     serializeImportResult,
     BULK_IMPORT_OUTPUT_SCHEMA,

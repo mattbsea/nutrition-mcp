@@ -1,3 +1,4 @@
+import { MIGRATIONS } from "./db/schema.js";
 import { test, expect } from "bun:test";
 import {
     toGrams,
@@ -234,14 +235,9 @@ test("measurementLabel turns a kind into a capitalised label", () => {
     expect(measurementLabel("waist")).toBe("Waist");
 });
 
-test("BODY_MEASUREMENT_KINDS matches the migration's kind check", async () => {
-    const sql = await Bun.file(
-        new URL(
-            "../supabase/migrations/20261002120000_body_measurements.sql",
-            import.meta.url,
-        ),
-    ).text();
-    const m = sql.match(/kind in \(([^)]*)\)/);
+test("BODY_MEASUREMENT_KINDS matches the schema's kind check", () => {
+    const sql = MIGRATIONS.map((m) => m.sql).join("\n");
+    const m = sql.match(/kind IN \(([^)]*)\)/);
     expect(m).not.toBeNull();
     const fromSql = [...m![1]!.matchAll(/'([a-z_]+)'/g)].map((x) => x[1]!);
     expect([...fromSql].sort()).toEqual([...BODY_MEASUREMENT_KINDS].sort());

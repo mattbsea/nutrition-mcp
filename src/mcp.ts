@@ -6,7 +6,7 @@ import {
     type McpRequestContext,
 } from "@modelcontextprotocol/server";
 import { getBaseUrl } from "./url.js";
-import { formatClientId } from "./client-id.js";
+import { OWNER_ID } from "./db/repo.js";
 import { z } from "zod";
 import type { Context } from "hono";
 import {
@@ -43,7 +43,6 @@ import {
     insertBodyMeasurement,
     getBodyMeasurementsInRange,
     getBodyMeasurement,
-    getSupabase,
     updateBodyMeasurement,
     deleteBodyMeasurement,
     preferredLengthUnitFromProfile,
@@ -87,12 +86,14 @@ import {
     type Profile,
     type WeightEntry,
     type BodyMeasurementEntry,
-} from "./supabase.js";
-import {
-    DELETED_ACCOUNT_ANALYTICS_ID,
-    withAnalytics,
-    categorizeError,
-} from "./analytics.js";
+    createSqliteHealthActivityLinkStore,
+    createSqliteHealthSyncStore,
+    type HealthActivityLinkStatus,
+    type HealthActivityLinkStore,
+    type HealthSyncLinkStatus,
+    type HealthSyncStore,
+} from "./db/repo.js";
+import { runTool, categorizeError } from "./tool-runner.js";
 import { ToolError, newErrorRef, toolErrorWithUserText } from "./errors.js";
 import {
     todayInTz,
@@ -163,12 +164,7 @@ import {
     type NutritionGoalsHistoryRow,
 } from "./goals-history.js";
 import { exportAllData } from "./export.js";
-import {
-    createSupabaseHealthActivityLinkStore,
-    createSupabaseHealthSyncStore,
-    type HealthActivityLinkStatus,
-    type HealthSyncLinkStatus,
-} from "./health-sync-store.js";
+import { removeAllExports } from "./export-files.js";
 import {
     runImport,
     buildSummaryText,
@@ -3023,10 +3019,6 @@ export function registerTools(
     userId: string,
     widgetsEnabled: boolean,
     alcohol: AlcoholDisplay,
-    // Optional so the many direct callers in mcp.test.ts keep working: they
-    // exercise tool behaviour, not analytics attribution, and a row with no era
-    // is exactly what a non-HTTP embedding should record.
-    protocolEra?: "legacy" | "modern",
     // The USDA client's seams (fetch, clock, env, cache, quota state, log).
     // Production passes nothing; the default cache store reads and writes
     // through the live supabase functions at call time. Tests inject a fetch
@@ -3034,14 +3026,6 @@ export function registerTools(
     usda: Partial<UsdaDeps> = {},
 ) {
     const usdaOverrides: Partial<UsdaDeps> = usda;
-    // One context for all 49 tools. clientInfo is a getter, not a value: at
-    // registration time the SDK has not yet resolved who is calling, and on the
-    // modern leg it backfills the identity per request before dispatch.
-    const analytics = {
-        userId,
-        protocolEra,
-        clientInfo: () => server.server.getClientVersion(),
-    };
     // Link a tool to its widget only when this user has widgets enabled. Because
     // buildMcpServer registers tools per request, this makes widget display a
     // per-user setting: with widgets off, tools/list advertises no UI link, so
@@ -3218,7 +3202,7 @@ export function registerTools(
             ...uiMeta(MEAL_LOGGED_WIDGET_URI),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "log_meal",
                 async () => {
                     // Items replace the totals: each item is checked on its
@@ -3332,7 +3316,6 @@ export function registerTools(
                         _meta: meta,
                     };
                 },
-                analytics,
             );
         },
     );
@@ -3382,7 +3365,7 @@ export function registerTools(
             ...uiMeta(IMPORT_MEALS_WIDGET_URI),
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "start_meal_import",
                 async () => {
                     const profile = await getProfile(userId);
@@ -3405,7 +3388,6 @@ export function registerTools(
                         structuredContent,
                     };
                 },
-                analytics,
             );
         },
     );
@@ -3484,7 +3466,7 @@ export function registerTools(
             _meta: { "openai/widgetAccessible": true },
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "bulk_import_meals",
                 async () => {
                     // One profile read serves both: the timezone, and whether the
@@ -3582,7 +3564,6 @@ export function registerTools(
                         structuredContent: serializeImportResult(result),
                     };
                 },
-                analytics,
                 undefined,
                 {
                     // Nothing landed means the call really failed, even though
@@ -3632,7 +3613,7 @@ export function registerTools(
             // completion before reading this via `outcome` below — it is not
             // read concurrently with the handler running.
             let offFailure: string | null = null;
-            return withAnalytics(
+            return runTool(
                 "lookup_barcode",
                 async () => {
                     const normalized = normalizeBarcode(barcode);
@@ -3699,7 +3680,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { barcode },
                 {
                     outcome: () =>
@@ -3750,7 +3730,7 @@ export function registerTools(
             // as an error; a pause or a refused key is a normal result, so it
             // is flagged here for the analytics row.
             let usdaFailure: string | null = null;
-            return withAnalytics(
+            return runTool(
                 "search_foods",
                 async () => {
                     const q = query.trim();
@@ -3785,7 +3765,6 @@ export function registerTools(
                             );
                     }
                 },
-                analytics,
                 undefined,
                 {
                     outcome: () =>
@@ -3826,7 +3805,7 @@ export function registerTools(
         },
         async ({ fdc_id, amount_g }) => {
             let usdaFailure: string | null = null;
-            return withAnalytics(
+            return runTool(
                 "get_food_macros",
                 async () => {
                     if (!Number.isSafeInteger(fdc_id) || fdc_id <= 0) {
@@ -3867,7 +3846,6 @@ export function registerTools(
                             );
                     }
                 },
-                analytics,
                 undefined,
                 {
                     outcome: () =>
@@ -3895,7 +3873,7 @@ export function registerTools(
             inputSchema: z.object({ detail: MEAL_DETAIL_FIELD }),
         },
         async ({ detail }) => {
-            return withAnalytics(
+            return runTool(
                 "get_meals_today",
                 async () => {
                     const tz = await getUserTimezone(userId);
@@ -3930,7 +3908,6 @@ export function registerTools(
                     });
                     return { content: [{ type: "text", text }] };
                 },
-                analytics,
             );
         },
     );
@@ -3954,7 +3931,7 @@ export function registerTools(
             }),
         },
         async ({ date, detail }) => {
-            return withAnalytics(
+            return runTool(
                 "get_meals_by_date",
                 async () => {
                     assertCalendarDate("date", date);
@@ -3986,7 +3963,6 @@ export function registerTools(
                     });
                     return { content: [{ type: "text", text }] };
                 },
-                analytics,
                 { date },
             );
         },
@@ -4015,7 +3991,7 @@ export function registerTools(
             }),
         },
         async ({ start_date, end_date, detail }) => {
-            return withAnalytics(
+            return runTool(
                 "get_meals_by_date_range",
                 async () => {
                     assertDateRange(
@@ -4060,7 +4036,6 @@ export function registerTools(
                     });
                     return { content: [{ type: "text", text }] };
                 },
-                analytics,
                 { start_date, end_date },
             );
         },
@@ -4104,7 +4079,7 @@ export function registerTools(
             }),
         },
         async ({ queries, days, limit }) => {
-            return withAnalytics(
+            return runTool(
                 "search_meals",
                 async () => {
                     const tz = await getUserTimezone(userId);
@@ -4152,7 +4127,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { days: days ?? 365 },
             );
         },
@@ -4388,7 +4362,7 @@ export function registerTools(
             ...uiMeta(SUMMARY_WIDGET_URI),
         },
         async ({ start_date, end_date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_nutrition_summary",
                 async () => {
                     assertDateRange(
@@ -4797,7 +4771,6 @@ export function registerTools(
                         },
                     };
                 },
-                analytics,
                 { start_date, end_date },
             );
         },
@@ -4864,7 +4837,7 @@ export function registerTools(
         },
         async ({ period }) => {
             const which = period ?? "yesterday";
-            return withAnalytics(
+            return runTool(
                 "get_digest",
                 async () => {
                     const now = new Date();
@@ -4923,7 +4896,6 @@ export function registerTools(
                         _meta: { [DIGEST_META_KEY]: result.meta },
                     };
                 },
-                analytics,
                 { period: which },
             );
         },
@@ -5063,7 +5035,7 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "set_nutrition_goals",
                 async () => {
                     const [existing, preferredUnit] = await Promise.all([
@@ -5157,7 +5129,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -5177,7 +5148,7 @@ export function registerTools(
             },
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "get_nutrition_goals",
                 async () => {
                     const [goals, unit] = await Promise.all([
@@ -5193,7 +5164,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -5242,7 +5212,7 @@ export function registerTools(
             ...uiMeta(GOAL_PROGRESS_WIDGET_URI),
         },
         async ({ date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_goal_progress",
                 async () => {
                     if (date !== undefined) assertCalendarDate("date", date);
@@ -5421,7 +5391,6 @@ export function registerTools(
                         },
                     };
                 },
-                analytics,
                 { date: date ?? "today" },
             );
         },
@@ -5449,7 +5418,7 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_meal",
                 async () => {
                     // Answered, not thrown: nothing with that id exists, the
@@ -5480,7 +5449,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -5612,7 +5580,7 @@ export function registerTools(
             user_stated: userStated,
             ...fields
         }) => {
-            return withAnalytics(
+            return runTool(
                 "update_meal",
                 async () => {
                     // Before resolveWriteTimestamp, which reads the profile.
@@ -5739,7 +5707,6 @@ export function registerTools(
                         _meta: meta,
                     };
                 },
-                analytics,
             );
         },
     );
@@ -5881,7 +5848,7 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "save_meal",
                 async () => {
                     const name = validateSavedMealName(args.name);
@@ -6042,7 +6009,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6072,7 +6038,7 @@ export function registerTools(
             }),
         },
         async ({ name_contains }) => {
-            return withAnalytics(
+            return runTool(
                 "get_saved_meals",
                 async () => {
                     const needle = name_contains?.trim() || undefined;
@@ -6120,7 +6086,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { name_contains },
             );
         },
@@ -6215,7 +6180,7 @@ export function registerTools(
             ...uiMeta(MEAL_LOGGED_WIDGET_URI),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "log_saved_meal",
                 async () => {
                     const saved = await resolveSavedMeal(
@@ -6333,7 +6298,6 @@ export function registerTools(
                         _meta: meta,
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6468,7 +6432,7 @@ export function registerTools(
             user_stated: userStated,
             ...fields
         }) => {
-            return withAnalytics(
+            return runTool(
                 "update_saved_meal",
                 async () => {
                     if (!isUuid(id))
@@ -6588,7 +6552,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6615,7 +6578,7 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_saved_meal",
                 async () => {
                     if (!isUuid(id)) {
@@ -6644,7 +6607,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6694,7 +6656,7 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "log_water",
                 async () => {
                     const { iso, note, tz } = await resolveWriteTimestamp(
@@ -6717,7 +6679,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6737,7 +6698,7 @@ export function registerTools(
             },
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "get_water_today",
                 async () => {
                     const tz = await getUserTimezone(userId);
@@ -6770,7 +6731,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6793,7 +6753,7 @@ export function registerTools(
             }),
         },
         async ({ date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_water_by_date",
                 async () => {
                     assertCalendarDate("date", date);
@@ -6823,7 +6783,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { date },
             );
         },
@@ -6850,7 +6809,7 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_water",
                 async () => {
                     // Answered, not thrown: nothing with that id exists, the
@@ -6881,7 +6840,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -6931,7 +6889,7 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "log_active_calories",
                 async () => {
                     const problem = activeKcalError(args.kcal);
@@ -6982,7 +6940,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7022,7 +6979,7 @@ export function registerTools(
             }),
         },
         async ({ date, start_date, end_date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_active_calories",
                 async () => {
                     const rangeGiven =
@@ -7105,7 +7062,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 date !== undefined
                     ? { date }
                     : {
@@ -7138,7 +7094,7 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_active_calories",
                 async () => {
                     if (!isUuid(id)) {
@@ -7167,7 +7123,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7194,7 +7149,7 @@ export function registerTools(
             }),
         },
         async ({ percent }) => {
-            return withAnalytics(
+            return runTool(
                 "set_activity_credit",
                 async () => {
                     if (percent !== null) {
@@ -7217,7 +7172,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7274,7 +7228,7 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "log_weight",
                 async () => {
                     const { iso, note, tz } = await resolveWriteTimestamp(
@@ -7305,7 +7259,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7325,7 +7278,7 @@ export function registerTools(
             },
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "get_weight_today",
                 async () => {
                     const [tz, weightPref] = await Promise.all([
@@ -7360,7 +7313,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7383,7 +7335,7 @@ export function registerTools(
             }),
         },
         async ({ date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_weight_by_date",
                 async () => {
                     assertCalendarDate("date", date);
@@ -7415,7 +7367,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { date },
             );
         },
@@ -7439,7 +7390,7 @@ export function registerTools(
             }),
         },
         async ({ start_date, end_date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_weight_by_date_range",
                 async () => {
                     assertDateRange(
@@ -7504,7 +7455,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { start_date, end_date },
             );
         },
@@ -7558,7 +7508,7 @@ export function registerTools(
             ...uiMeta(WEIGHT_TRENDS_WIDGET_URI),
         },
         async ({ days, end_date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_weight_trends",
                 async () => {
                     if (end_date !== undefined)
@@ -7677,7 +7627,6 @@ export function registerTools(
                         },
                     };
                 },
-                analytics,
                 { days: days ?? 30 },
             );
         },
@@ -7725,7 +7674,7 @@ export function registerTools(
             }),
         },
         async ({ id, weight, unit, logged_at, notes }) => {
-            return withAnalytics(
+            return runTool(
                 "update_weight",
                 async () => {
                     // Before resolveWriteTimestamp, which reads the profile.
@@ -7770,7 +7719,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7796,7 +7744,7 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_weight",
                 async () => {
                     // Answered, not thrown: nothing with that id exists, the
@@ -7827,7 +7775,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7855,7 +7802,7 @@ export function registerTools(
             }),
         },
         async ({ unit }) => {
-            return withAnalytics(
+            return runTool(
                 "set_weight_unit",
                 async () => {
                     if (unit !== null && !isWeightUnit(unit)) {
@@ -7877,7 +7824,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -7936,7 +7882,7 @@ export function registerTools(
             }),
         },
         async (args) => {
-            return withAnalytics(
+            return runTool(
                 "log_body_measurement",
                 async () => {
                     const { iso, note, tz } = await resolveWriteTimestamp(
@@ -7978,7 +7924,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8015,7 +7960,7 @@ export function registerTools(
             }),
         },
         async ({ kind, start_date, end_date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_body_measurements",
                 async () => {
                     // Before shiftLocalDate, which rolls bad dates over.
@@ -8102,7 +8047,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { start_date, end_date },
             );
         },
@@ -8151,7 +8095,7 @@ export function registerTools(
             }),
         },
         async ({ id, value, unit, logged_at, notes }) => {
-            return withAnalytics(
+            return runTool(
                 "update_body_measurement",
                 async () => {
                     // Before resolveWriteTimestamp, which reads the profile.
@@ -8216,7 +8160,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8242,7 +8185,7 @@ export function registerTools(
             }),
         },
         async ({ id }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_body_measurement",
                 async () => {
                     // Answered, not thrown: nothing with that id exists, the
@@ -8273,7 +8216,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8301,7 +8243,7 @@ export function registerTools(
             }),
         },
         async ({ unit }) => {
-            return withAnalytics(
+            return runTool(
                 "set_length_unit",
                 async () => {
                     if (unit !== null && !isLengthUnit(unit)) {
@@ -8324,7 +8266,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8351,7 +8292,7 @@ export function registerTools(
             }),
         },
         async ({ enabled }) => {
-            return withAnalytics(
+            return runTool(
                 "set_widget_display",
                 async () => {
                     const profile = await upsertProfile(userId, {
@@ -8368,7 +8309,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8412,7 +8352,7 @@ export function registerTools(
         // re-reading the profile every time — so the very next tool call, in the
         // same open chat, already sees the new setting.
         async ({ enabled, drink_unit }) => {
-            return withAnalytics(
+            return runTool(
                 "set_alcohol_tracking",
                 async () => {
                     const profile = await upsertProfile(userId, {
@@ -8437,7 +8377,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8491,7 +8430,7 @@ export function registerTools(
             ...uiMeta(TRENDS_WIDGET_URI),
         },
         async ({ days, end_date, group_by }) => {
-            return withAnalytics(
+            return runTool(
                 "get_trends",
                 async () => {
                     if (end_date !== undefined)
@@ -8671,7 +8610,6 @@ export function registerTools(
                         },
                     };
                 },
-                analytics,
                 { days: days ?? 30 },
             );
         },
@@ -8707,7 +8645,7 @@ export function registerTools(
             }),
         },
         async ({ days, end_date }) => {
-            return withAnalytics(
+            return runTool(
                 "get_meal_patterns",
                 async () => {
                     if (end_date !== undefined)
@@ -8739,7 +8677,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
                 { days: days ?? 30 },
             );
         },
@@ -8750,7 +8687,7 @@ export function registerTools(
         {
             title: "Export All Data",
             description:
-                "Export EVERYTHING this server stores about the user — meals with their ingredients and the source of each nutrient value (a food record, a value the user gave, or an estimate), saved meals with their ingredients, water, active calories, weight, body measurements, nutrition goals and every dated change to them, profile settings, the sign-in account (email, sign-in methods and dates), tool-usage telemetry, the AI-app connections (OAuth grants, without the tokens) and the Apple Health sync connection with its 8-day record of what was sent — as a single ZIP archive (meals.csv, meal_items.csv, saved_meals.csv, saved_meal_items.csv, water.csv, active_calories.csv, weight.csv, body_measurements.csv, goals.csv, goals_history.csv, profile.csv, account.csv, telemetry.csv, connections.csv, health_sync.csv, plus a README.txt describing the columns, the units they are in, and what is not included) and return a private, time-limited download link (valid 60 minutes). Timestamps use the user's timezone if set, otherwise UTC; health_sync.csv rows use the timezone each day was counted in. Only meals.csv can be read back in; every other file is export-only. This is the server's only export path: it covers a full backup, an account takeout, and a request for the meal history alone, which is meals.csv inside the archive. The link is for the user to download the archive.",
+                "Export EVERYTHING this server stores about the user — meals with their ingredients and the source of each nutrient value (a food record, a value the user gave, or an estimate), saved meals with their ingredients, water, active calories, weight, body measurements, nutrition goals and every dated change to them, profile settings, and the Apple Health sync connections with their 8-day record of what was sent — as a single ZIP archive (meals.csv, meal_items.csv, saved_meals.csv, saved_meal_items.csv, water.csv, active_calories.csv, weight.csv, body_measurements.csv, goals.csv, goals_history.csv, profile.csv, connections.csv, health_sync.csv, plus a README.txt describing the columns, the units they are in, and what is not included) and return a private, time-limited download link (valid 60 minutes). Timestamps use the user's timezone if set, otherwise UTC; health_sync.csv rows use the timezone each day was counted in. Only meals.csv can be read back in; every other file is export-only. This is the server's only export path: it covers a full backup, an account takeout, and a request for the meal history alone, which is meals.csv inside the archive. The link is for the user to download the archive.",
             annotations: {
                 title: "Export All Data",
                 readOnlyHint: false,
@@ -8760,10 +8697,10 @@ export function registerTools(
             },
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "export_all_data",
                 async () => {
-                    const { counts, goals, profile, account, url } =
+                    const { counts, goals, profile, url } =
                         await exportAllData(userId);
                     // No link means the account had nothing at all — not even a
                     // profile row — so there is no archive to hand over.
@@ -8789,9 +8726,7 @@ export function registerTools(
                         goals ? "nutrition goals" : "no nutrition goals set",
                         `${counts.goalsHistory} goal ${counts.goalsHistory === 1 ? "change" : "changes"}`,
                         profile ? "profile settings" : "no profile settings",
-                        account ? "account details" : "no account record",
-                        `${counts.telemetry} tool-usage telemetry ${counts.telemetry === 1 ? "row" : "rows"}`,
-                        `${counts.connections} app connection ${counts.connections === 1 ? "record" : "records"}`,
+                        `${counts.connections} Apple Health shortcut connection ${counts.connections === 1 ? "record" : "records"}`,
                         `${counts.healthSync} Apple Health sync ${counts.healthSync === 1 ? "day" : "days"}`,
                     ].join(", ");
                     return {
@@ -8803,7 +8738,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8876,7 +8810,7 @@ export function registerTools(
             },
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "get_profile",
                 async () => {
                     const [profile, healthSync, activitySync] =
@@ -8885,7 +8819,7 @@ export function registerTools(
                             // Read beside the profile, and never allowed to fail
                             // it: the sync status is one line of many, and the
                             // rest of the profile is what this tool is for.
-                            createSupabaseHealthSyncStore()
+                            createSqliteHealthSyncStore()
                                 .getLinkStatus(userId)
                                 .catch((err: unknown) => {
                                     const ref = newErrorRef();
@@ -8894,7 +8828,7 @@ export function registerTools(
                                     );
                                     return undefined;
                                 }),
-                            createSupabaseHealthActivityLinkStore()
+                            createSqliteHealthActivityLinkStore()
                                 .getActivityLinkStatus(userId)
                                 .catch(() => undefined),
                         ]);
@@ -8941,7 +8875,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -8968,7 +8901,7 @@ export function registerTools(
             }),
         },
         async ({ timezone }) => {
-            return withAnalytics(
+            return runTool(
                 "set_timezone",
                 async () => {
                     if (!validateTz(timezone)) {
@@ -8986,7 +8919,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -9012,7 +8944,7 @@ export function registerTools(
             }),
         },
         async ({ locale }) => {
-            return withAnalytics(
+            return runTool(
                 "set_language",
                 async () => {
                     if (!SITE_LOCALES.includes(locale as SiteLocale)) {
@@ -9030,7 +8962,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -9056,7 +8987,7 @@ export function registerTools(
             },
         },
         async () => {
-            return withAnalytics(
+            return runTool(
                 "get_current_time",
                 async () => {
                     const configuredTz = timezoneFromProfile(
@@ -9075,7 +9006,6 @@ export function registerTools(
                         ],
                     };
                 },
-                analytics,
             );
         },
     );
@@ -9085,7 +9015,7 @@ export function registerTools(
         {
             title: "Delete Nutrition Account",
             description:
-                "Permanently delete the user's Nutrition MCP account and all data this service stores about them (meals and their ingredients, saved meals and their ingredients, water, active calories, weight, body measurements, goals, settings, exports, usage records, sign-in tokens, and the Apple Health sync connection with its record of values sent). Totals already written to Apple Health stay on the user's iPhone. Irreversible. Always confirm with the user before calling this tool.",
+                "Permanently delete the user's Nutrition MCP account and all data this service stores about them (meals and their ingredients, saved meals and their ingredients, water, active calories, weight, body measurements, goals, settings, export archives, and the Apple Health sync connections with their record of values sent). Totals already written to Apple Health stay on the user's iPhone. Irreversible. Always confirm with the user before calling this tool.",
             annotations: {
                 title: "Delete Nutrition Account",
                 readOnlyHint: false,
@@ -9102,7 +9032,7 @@ export function registerTools(
             }),
         },
         async ({ confirm }) => {
-            return withAnalytics(
+            return runTool(
                 "delete_account",
                 async () => {
                     if (!confirm) {
@@ -9116,6 +9046,10 @@ export function registerTools(
                         };
                     }
                     await deleteAllUserData(userId);
+                    // Export archives are files outside the database, so they
+                    // are removed separately (the database delete is one
+                    // transaction; this cannot be part of it).
+                    removeAllExports();
                     return {
                         content: [
                             {
@@ -9124,14 +9058,6 @@ export function registerTools(
                             },
                         ],
                     };
-                },
-                // deleteAllUserData wipes tool_analytics before anything else,
-                // so the row withAnalytics writes once this handler settles
-                // must not carry the id it just erased. Only the cancelled path
-                // (nothing deleted) still belongs to the real user.
-                {
-                    ...analytics,
-                    userId: confirm ? DELETED_ACCOUNT_ANALYTICS_ID : userId,
                 },
             );
         },
@@ -9190,7 +9116,6 @@ function newMcpServer(baseUrl: string): McpServer {
 async function buildMcpServer(
     baseUrl: string,
     userId: string,
-    protocolEra?: "legacy" | "modern",
 ): Promise<McpServer> {
     const server = newMcpServer(baseUrl);
 
@@ -9210,7 +9135,6 @@ async function buildMcpServer(
         userId,
         widgetsEnabledFromProfile(profile),
         alcoholTrackingEnabledFromProfile(profile) ? (drinkUnit ?? "us") : null,
-        protocolEra,
     );
     return server;
 }
@@ -9246,42 +9170,11 @@ const IDENTITY_ONLY_METHODS = new Set([
 // kept in-process between requests on either leg, which is what keeps deploys
 // invisible to clients — there is no session to lose.
 //
-// The factory has no Hono context: the authenticated user arrives through the
-// `authInfo` pass-through (`extra.userId`, set in handleMcp from the bearer
-// middleware's verdict) and the public origin comes from the raw request.
-// Observability only, and the instrument that makes retiring the legacy leg a
-// measurable decision rather than a guess. The negotiated era is decided inside
-// the SDK and surfaces in exactly one place — `ctx.era` on the factory context —
-// so handleMcp passes a mutable holder down through the `authInfo` pass-through
-// for the factory to stamp on the way through. When no request has logged
-// era=legacy for a sustained window, flipping `legacy: "reject"` is safe.
-//
-// Requests refused before the factory runs (415, header/body mismatch,
-// unsupported revision) never get stamped, and log without an era rather than a
-// guessed one.
-export type McpEraTrace = {
-    era?: "legacy" | "modern";
-    // The server built for this request, kept so handleMcp can read the client
-    // identity the SDK resolved. Only readable AFTER the exchange: on the modern
-    // leg the envelope backfills it per request, on the legacy leg only
-    // `initialize` carries clientInfo at all.
-    server?: McpServer;
-};
-
+// There is exactly one principal (OWNER_ID): the secret path key checked by
+// src/perimeter.ts is the only authentication, so the factory needs no
+// identity from the request. The public origin comes from the raw request.
 const mcpHandler = createMcpHandler(
     async (ctx: McpRequestContext) => {
-        const trace = ctx.authInfo?.extra?.trace as McpEraTrace | undefined;
-        if (trace) trace.era = ctx.era;
-
-        const userId = ctx.authInfo?.extra?.userId;
-        if (typeof userId !== "string" || userId.length === 0) {
-            // handleMcp always sets it; reaching here means the /mcp route was
-            // wired without authenticateBearer, which must fail loudly rather
-            // than serve an anonymous server.
-            throw new Error(
-                "mcp: request reached the handler without a userId",
-            );
-        }
         // requestInfo is set on both HTTP legs; the fallback only covers a
         // non-HTTP embedding of this factory (e.g. serveStdio), which never
         // reaches production.
@@ -9291,14 +9184,10 @@ const mcpHandler = createMcpHandler(
 
         const mcpMethod = ctx.requestInfo?.headers.get("mcp-method") ?? "";
         if (ctx.era === "modern" && IDENTITY_ONLY_METHODS.has(mcpMethod)) {
-            const bare = newMcpServer(baseUrl);
-            if (trace) trace.server = bare;
-            return bare;
+            return newMcpServer(baseUrl);
         }
 
-        const server = await buildMcpServer(baseUrl, userId, ctx.era);
-        if (trace) trace.server = server;
-        return server;
+        return buildMcpServer(baseUrl, OWNER_ID);
     },
     {
         legacy: "stateless",
@@ -9382,36 +9271,11 @@ export const handleMcp = async (c: Context) => {
         );
     }
 
-    const userId = c.get("userId") as string;
-
-    // The handler never derives auth from headers: authInfo is pass-through,
-    // and the only consumer is our own factory above. `extra.userId` is the
-    // single authoritative carrier — the SDK-designated slot for application
-    // data, which the factory reads behind a typeof guard because `extra` is
-    // untyped. clientId is left blank on purpose: it is an OAuth field the SDK
-    // documents as "the client ID associated with this token", not an
-    // app-identity slot, and carrying the user id in both places left no way to
-    // tell which one a future reader (or a future SDK feature) should trust.
-    // Nothing on the serve path reads it. The real bearer token is deliberately
-    // NOT forwarded either — nothing downstream needs it, and keeping it out of
-    // the SDK's context means no handler or error path can echo it.
-    const trace: McpEraTrace = {};
-    const response = await mcpHandler.fetch(c.req.raw, {
-        authInfo: {
-            token: "",
-            clientId: "",
-            scopes: [],
-            extra: { userId, trace },
-        },
-    });
-
-    // Published for the access log in src/index.ts, which runs outermost and
-    // reads this after next() resolves. Set after fetch resolves, which is
-    // after the factory has run even when the response body is still streaming.
-    if (trace.era) c.set("mcpEra", trace.era);
-    const client = formatClientId(trace.server?.server.getClientVersion());
-    if (client) c.set("mcpClient", client);
-    return response;
+    // The handler never derives auth from headers or the URL: the path key was
+    // verified by the perimeter middleware before this ran, and nothing about
+    // it (the URL included) is forwarded into the SDK's context, so no handler
+    // or error path can echo it.
+    return mcpHandler.fetch(c.req.raw);
 };
 
 // Aborts any in-flight 2026-era exchanges on shutdown. The legacy leg holds

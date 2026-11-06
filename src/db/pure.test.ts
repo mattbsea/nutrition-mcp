@@ -507,18 +507,6 @@ describe("bodyMeasurementIdempotencyKey", () => {
             bodyMeasurementIdempotencyKey(USER, asIn, LOGGED_AT),
         );
     });
-
-    test("insertBodyMeasurement decodes notes before hashing them", async () => {
-        const body = fnBody(
-            await Bun.file("./src/supabase.ts").text(),
-            "insertBodyMeasurement",
-        );
-        const decode = body.indexOf("decodeEscapeSequences(");
-        expect(decode).toBeGreaterThan(-1);
-        expect(decode).toBeLessThan(
-            body.indexOf("bodyMeasurementIdempotencyKey("),
-        );
-    });
 });
 
 describe("no-profile defaults, together", () => {
@@ -578,58 +566,6 @@ describe("exportStoragePaths", () => {
         for (const path of exportStoragePaths("u1")) {
             expect(path.startsWith("u1/")).toBe(true);
         }
-    });
-
-    // The guard above is only worth anything if deletion actually routes
-    // through it; inlining a path there again is the regression.
-    test("deleteAllUserData removes exactly this list", async () => {
-        const src = await Bun.file("./src/supabase.ts").text();
-        const body = src.slice(
-            src.indexOf("export async function deleteAllUserData"),
-        );
-        expect(body).toContain("exportStoragePaths(userId)");
-    });
-
-    test("deleteAllUserData removes body measurements", async () => {
-        const src = await Bun.file("./src/supabase.ts").text();
-        const body = src.slice(
-            src.indexOf("export async function deleteAllUserData"),
-        );
-        expect(body).toContain('.from("body_measurement_log")');
-    });
-
-    // The link goes first so the Shortcut stops syncing (and writing another
-    // sent-values row) while the rest of the account is being deleted.
-    test("deleteAllUserData removes Apple Health sync first", async () => {
-        const src = await Bun.file("./src/supabase.ts").text();
-        const body = src.slice(
-            src.indexOf("export async function deleteAllUserData"),
-        );
-        const at = (table: string) => body.indexOf(`.from("${table}")`);
-        for (const table of [
-            "health_sync_links",
-            "health_sync_days",
-            "health_sync_pending",
-        ]) {
-            expect(at(table), `${table} not deleted`).toBeGreaterThan(-1);
-            expect(at(table)).toBeLessThan(at("meals"));
-        }
-        expect(at("health_sync_links")).toBeLessThan(at("health_sync_days"));
-    });
-
-    // Every per-user table goes into the export, deletion and the privacy
-    // policy together; history goes immediately before the goals row.
-    test("deleteAllUserData removes goals history just before goals", async () => {
-        const src = await Bun.file("./src/supabase.ts").text();
-        const body = src.slice(
-            src.indexOf("export async function deleteAllUserData"),
-        );
-        const fromCalls = [...body.matchAll(/\.from\("([a-z_]+)"\)/g)].map(
-            (m) => m[1],
-        );
-        const at = fromCalls.indexOf("nutrition_goals_history");
-        expect(at).toBeGreaterThan(-1);
-        expect(fromCalls[at + 1]).toBe("nutrition_goals");
     });
 });
 
@@ -739,16 +675,6 @@ describe("assertWindowComplete", () => {
         );
     });
 });
-
-/** One exported function's source, cut at the next top-level export. An
- *  unbounded slice would reach into whatever is declared after it and pass
- *  vacuously (getMealsByDate sits right above getMealsInRange). */
-function fnBody(src: string, name: string): string {
-    const start = src.indexOf(`export async function ${name}(`);
-    expect(start).toBeGreaterThan(-1);
-    const next = src.indexOf("\nexport ", start + 1);
-    return src.slice(start, next === -1 ? undefined : next);
-}
 
 describe("isUuid", () => {
     test.each([

@@ -1,4 +1,4 @@
-import type { Meal, NutritionGoals, WaterEntry } from "./supabase.js";
+import type { Meal, NutritionGoals, WaterEntry } from "./db/repo.js";
 import { dateInTz, hourInTz } from "./tz.js";
 import { formatWeight, fromGrams, type WeightUnit } from "./units.js";
 import {

@@ -7,7 +7,7 @@ import {
     formatSavedMealMatches,
     type SavedMealSummary,
 } from "./search.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 function meal(overrides: Partial<Meal> = {}): Meal {
     return {

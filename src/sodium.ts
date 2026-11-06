@@ -1,6 +1,6 @@
 import { dayCarries } from "./insights.js";
 import type { NutrientExtraRow } from "./saturated-fat.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 /**
  * Sodium: the widget payload under SODIUM_META_KEY (src/widgets.ts), built the

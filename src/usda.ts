@@ -18,7 +18,7 @@
 // URL, and the adapter never puts upstream text or URLs into an error.
 
 import { UpstreamError } from "./errors.js";
-import { readUsdaFoodCache, writeUsdaFoodCache } from "./supabase.js";
+import { readUsdaFoodCache, writeUsdaFoodCache } from "./db/repo.js";
 import {
     type UsdaDataType,
     type UsdaPortion,
@@ -480,7 +480,7 @@ export interface UsdaCacheStore {
 
 // Delegates at call time, not at module load, so a test that swaps the
 // Supabase functions still takes effect for the production store.
-export const supabaseUsdaCache: UsdaCacheStore = {
+export const repoUsdaCache: UsdaCacheStore = {
     get: (fdcId) => readUsdaFoodCache(fdcId),
     put: (record, fetchedAt) => writeUsdaFoodCache(record, fetchedAt),
 };
@@ -511,7 +511,7 @@ export function usdaDeps(overrides: Partial<UsdaDeps> = {}): UsdaDeps {
         fetch: (url, init) => fetch(url, init),
         now: () => Date.now(),
         env: process.env,
-        cache: supabaseUsdaCache,
+        cache: repoUsdaCache,
         state: processState,
         log: (line) => console.log(line),
         ...overrides,

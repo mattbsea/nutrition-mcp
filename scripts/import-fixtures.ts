@@ -10,7 +10,7 @@
 // real parser, mapper and preview rather than a mock of them.
 
 import { buildMealsCsv } from "../src/export.js";
-import type { Meal } from "../src/supabase.js";
+import type { Meal } from "../src/db/repo.js";
 
 export interface ImportFixture {
     name: string;

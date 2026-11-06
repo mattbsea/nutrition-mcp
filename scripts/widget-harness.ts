@@ -138,7 +138,7 @@ import type {
     MealInput,
     MealInsertResult,
     WaterEntry,
-} from "../src/supabase.js";
+} from "../src/db/repo.js";
 import { shiftLocalDate } from "../src/tz.js";
 import { fromGrams, type WeightUnit } from "../src/units.js";
 import { analyzeWeightHistory, defaultRangeFor } from "../src/weight-trend.js";

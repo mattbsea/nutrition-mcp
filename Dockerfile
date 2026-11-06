@@ -1,25 +1,22 @@
-FROM oven/bun:1.4.4 AS base
-# TZ-independent: the app never relies on the process time zone.
+# Pinned to the Bun release the code was built and tested with: the SQLite layer
+# needs bun:sqlite's Database#function and Transaction#immediate, and SQLite
+# >= 3.37 for STRICT tables (src/db/migrate.ts checks this at startup).
+FROM oven/bun:1.4.4
+# The app never relies on the process time zone; timestamps are UTC.
 ENV TZ=UTC
+ENV NODE_ENV=production
+# All state (SQLite database, keys.json, export archives) lives under DATA_DIR.
+ENV DATA_DIR=/data
 WORKDIR /app
 COPY package.json bun.lock ./
-RUN bun install --frozen-lockfile
-COPY . .
-# App Platform hands build-time env vars to a Dockerfile build only as build
-# args, so NOINDEX must be declared here for gen:all to see it and leave the
-# analytics tags out of the dev deploy's pages. Unset means empty: prod keeps them.
-ARG NOINDEX
-# Same for the /apple-health install button: the iCloud link of the shortcut
-# built for this deploy. Unset means the page says the link is coming.
-ARG HEALTH_SYNC_SHORTCUT_URL
-# And the optional activity shortcut's link (Nutrition MCP Activity).
-ARG HEALTH_ACTIVITY_SHORTCUT_URL
-RUN bun run gen:all
+RUN bun install --frozen-lockfile --production
+COPY src ./src
+COPY public ./public
+RUN mkdir -p /data && chown bun:bun /data
+VOLUME /data
 USER bun
 EXPOSE 8080
-# --smol runs Bun's GC more aggressively and grows the heap more slowly,
-# keeping RSS low on the 512MB instance. The memory "climb" is GC sawtooth,
-# not a leak (the heap is reclaimed without a restart); --smol lowers the
-# sawtooth peaks to reduce OOM risk under bursts. CPU sits at ~2-5%, so the
-# extra GC work is effectively free for this workload.
+# --smol runs Bun's GC more aggressively and grows the heap more slowly, keeping
+# RSS low. Set TRUST_PROXY=1 when running behind a reverse proxy you control
+# (the Home Assistant add-on does).
 CMD ["bun", "--smol", "src/index.ts"]

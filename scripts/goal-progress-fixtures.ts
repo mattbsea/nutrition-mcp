@@ -24,7 +24,7 @@ import {
 } from "../src/provenance.js";
 import { buildSaturatedFatMeta } from "../src/saturated-fat.js";
 import { buildSodiumMeta } from "../src/sodium.js";
-import type { Meal, WaterEntry } from "../src/supabase.js";
+import type { Meal, WaterEntry } from "../src/db/repo.js";
 import {
     ADDED_SUGAR_META_KEY,
     GOAL_DAY_META_KEY,

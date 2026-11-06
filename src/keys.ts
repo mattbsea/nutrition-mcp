@@ -1,0 +1,131 @@
+/**
+ * Server secrets persisted under DATA_DIR/keys.json (mode 600).
+ *
+ *  - mcp_key      the secret in the MCP URL path (/mcp/<key>). MCP_KEY in the
+ *                 environment wins (and is then never written to disk);
+ *                 otherwise 48 random bytes, base64url, generated once.
+ *  - export_secret HMAC key that signs export download links.
+ *
+ * The file is read-modify-written so later steps can add their own keys
+ * (shortcut key, dashboard session secret) without this module knowing them.
+ * Nothing here ever logs a key value: callers log only WHERE to read it.
+ */
+import { randomBytes } from "node:crypto";
+import {
+    chmodSync,
+    existsSync,
+    mkdirSync,
+    readFileSync,
+    renameSync,
+    writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+
+export interface KeyStore {
+    /** The MCP path key actually in force (env override or persisted). */
+    mcpKey: string;
+    /** True when mcpKey came from the MCP_KEY environment variable. */
+    mcpKeyFromEnv: boolean;
+    /** True when this call generated and persisted a new mcp_key. */
+    mcpKeyGenerated: boolean;
+    exportSecret: string;
+    /** Absolute path of keys.json. */
+    file: string;
+}
+
+/** DATA_DIR, defaulting to ./data like the database. */
+export function dataDir(): string {
+    return process.env.DATA_DIR || "./data";
+}
+
+export function keysFilePath(dir: string = dataDir()): string {
+    return join(dir, "keys.json");
+}
+
+const newSecret = (bytes = 48): string =>
+    randomBytes(bytes).toString("base64url");
+
+function readKeys(file: string): Record<string, unknown> {
+    if (!existsSync(file)) return {};
+    try {
+        const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : {};
+    } catch {
+        // A corrupt file must not silently mint a new key set over it.
+        throw new Error(
+            `${file} exists but is not valid JSON; fix or remove it (a new mcp_key would invalidate the connector).`,
+        );
+    }
+}
+
+/** Atomic write, owner-only. */
+function writeKeys(file: string, keys: Record<string, unknown>): void {
+    mkdirSync(dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(keys, null, 2) + "\n", { mode: 0o600 });
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, file);
+}
+
+const isSecret = (v: unknown): v is string =>
+    typeof v === "string" && v.length >= 16;
+
+/**
+ * Loads (creating on first run) the key file. `env` is injectable for tests.
+ * An MCP_KEY shorter than 16 characters is refused: a weak secret in a public
+ * URL path is worse than a clear startup failure.
+ */
+export function loadKeys(
+    dir: string = dataDir(),
+    env: Record<string, string | undefined> = process.env,
+): KeyStore {
+    const file = keysFilePath(dir);
+    const keys = readKeys(file);
+    let dirty = false;
+
+    if (!isSecret(keys.export_secret)) {
+        keys.export_secret = newSecret(32);
+        dirty = true;
+    }
+
+    const fromEnv = env.MCP_KEY?.trim();
+    if (fromEnv !== undefined && fromEnv !== "" && fromEnv.length < 16) {
+        throw new Error("MCP_KEY must be at least 16 characters.");
+    }
+    let mcpKey: string;
+    let generated = false;
+    if (fromEnv) {
+        mcpKey = fromEnv;
+    } else if (isSecret(keys.mcp_key)) {
+        mcpKey = keys.mcp_key;
+    } else {
+        mcpKey = newSecret(48);
+        keys.mcp_key = mcpKey;
+        generated = true;
+        dirty = true;
+    }
+
+    if (dirty) writeKeys(file, keys);
+    return {
+        mcpKey,
+        mcpKeyFromEnv: Boolean(fromEnv),
+        mcpKeyGenerated: generated,
+        exportSecret: keys.export_secret as string,
+        file,
+    };
+}
+
+let cached: KeyStore | undefined;
+
+/** The process-wide key store (loaded on first use). */
+export function getKeys(): KeyStore {
+    cached ??= loadKeys();
+    return cached;
+}
+
+/** Test seam: drop the cache so the next getKeys() re-reads DATA_DIR. */
+export function resetKeysForTest(): void {
+    cached = undefined;
+}

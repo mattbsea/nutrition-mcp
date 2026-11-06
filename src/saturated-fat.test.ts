@@ -8,7 +8,7 @@ import {
     saturatedFatExtra,
     transFatExtra,
 } from "./saturated-fat.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 function meal(over: Partial<Meal>): Meal {
     return {

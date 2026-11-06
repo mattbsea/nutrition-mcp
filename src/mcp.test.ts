@@ -81,7 +81,7 @@ import {
     type JsonSchemaType,
 } from "@modelcontextprotocol/server";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
-import * as actualSupabase from "./supabase.js";
+import * as actualSupabase from "./db/repo.js";
 import type { ReferenceRecord } from "./provenance.js";
 import { referenceFromUsda } from "./provenance.js";
 import {
@@ -138,7 +138,7 @@ import type {
     WaterEntry,
     WeightEntry,
     BodyMeasurementEntry,
-} from "./supabase.js";
+} from "./db/repo.js";
 import { MEAL_NUTRIENT_KEYS, type MealItemValues } from "./meal-items.js";
 import {
     dateInTz,
@@ -1824,7 +1824,7 @@ function healthSyncSelect(table: string) {
     return chain;
 }
 
-mock.module("./supabase.js", () => ({
+mock.module("./db/repo.js", () => ({
     ...actualSupabase,
     // analytics.ts persists every tool call through getSupabase(); intercept it
     // so a test never depends on Supabase env vars being present, and so the
@@ -2252,7 +2252,7 @@ mock.module("./supabase.js", () => ({
 }));
 
 afterAll(() => {
-    mock.module("./supabase.js", () => realSupabase);
+    mock.module("./db/repo.js", () => realSupabase);
 });
 
 beforeEach(() => {

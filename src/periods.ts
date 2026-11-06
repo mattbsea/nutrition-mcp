@@ -1,4 +1,4 @@
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 import { buildDailyBuckets, withinBand } from "./insights.js";
 import {
     goalsOnDate,

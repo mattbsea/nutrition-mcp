@@ -273,6 +273,15 @@ describe("body measurements", () => {
         ).rejects.toBeInstanceOf(ToolError);
     });
 
+    test("notes are decoded BEFORE the dedupe digest is computed", async () => {
+        const a = await insertBodyMeasurement(USER, { ...waist, notes: "after\\u0041" });
+        expect(a.entry.notes).toBe("afterA");
+        // The same note typed already-decoded is the same measurement.
+        const b = await insertBodyMeasurement(USER, { ...waist, notes: "afterA" });
+        expect(b.deduplicated).toBe(true);
+        expect(b.entry.id).toBe(a.entry.id);
+    });
+
     test("rejects an unknown kind or unit at the database", async () => {
         await expect(
             insertBodyMeasurement(USER, { ...waist, kind: "elbow" as never }),

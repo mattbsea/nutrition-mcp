@@ -21,7 +21,7 @@
 //      resolveLoggedAt asserts the round trip rather than trusting the math.
 
 import { z } from "zod";
-import type { MealInput, MealInsertResult } from "./supabase.js";
+import type { MealInput, MealInsertResult } from "./db/repo.js";
 import {
     LOGGED_AT_FIX,
     loggedAtFailureReason,

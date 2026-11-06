@@ -21,7 +21,7 @@ import type {
     NutritionGoals,
     WaterEntry,
     WeightEntry,
-} from "../src/supabase.js";
+} from "../src/db/repo.js";
 import { DIGEST_META_KEY } from "../src/widgets.js";
 
 type Item = [name: string, amount: string, kcal: number];

@@ -12,7 +12,7 @@ import {
     dayAddedSugar,
     roundedAddedSugar,
 } from "./added-sugar.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 function meal(id: string, fields: Partial<Meal> = {}): Meal {
     return {

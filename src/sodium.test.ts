@@ -5,7 +5,7 @@ import {
     roundedSodium,
     sodiumExtra,
 } from "./sodium.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 function meal(over: Partial<Meal>): Meal {
     return {

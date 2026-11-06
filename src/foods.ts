@@ -7,7 +7,7 @@
 // back to LLM estimation, so the lookup is always additive, never a hard
 // dependency for logging a meal.
 
-import { getSupabase } from "./supabase.js";
+import { readFoodCache, writeFoodCache } from "./db/repo.js";
 import { gramsFromDrink, formatAlcohol, type DrinkUnit } from "./alcohol.js";
 import { addedSugarError } from "./added-sugar.js";
 
@@ -390,16 +390,11 @@ async function getCachedFood(
     ttlMs: number,
 ): Promise<{ food: FoodResult; stale: boolean } | null> {
     try {
-        const { data, error } = await getSupabase()
-            .from("food_cache")
-            .select("payload, fetched_at")
-            .eq("source", source)
-            .eq("source_id", sourceId)
-            .maybeSingle();
-        if (error || !data) return null;
-        const ageMs = Date.now() - new Date(data.fetched_at).getTime();
+        const hit = await readFoodCache(source, sourceId);
+        if (!hit) return null;
+        const ageMs = Date.now() - new Date(hit.fetched_at).getTime();
         if (ageMs > ttlMs) return null;
-        return fromCachedPayload(data.payload as FoodResult);
+        return fromCachedPayload(hit.payload as FoodResult);
     } catch {
         return null;
     }
@@ -410,19 +405,8 @@ async function putCachedFood(
     sourceId: string,
     payload: FoodResult,
 ): Promise<void> {
-    try {
-        await getSupabase().from("food_cache").upsert(
-            {
-                source,
-                source_id: sourceId,
-                payload,
-                fetched_at: new Date().toISOString(),
-            },
-            { onConflict: "source,source_id" },
-        );
-    } catch {
-        // best-effort; ignore
-    }
+    // Best-effort: writeFoodCache swallows its own failures.
+    await writeFoodCache(source, sourceId, payload);
 }
 
 /**

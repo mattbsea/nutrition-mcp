@@ -27,7 +27,7 @@ import type {
     NutritionGoals,
     WaterEntry,
     WeightEntry,
-} from "./supabase.js";
+} from "./db/repo.js";
 import { localClock } from "./meal-times.js";
 import { dateInTz, shiftLocalDate } from "./tz.js";
 import { daysBetween } from "./weight-trend.js";

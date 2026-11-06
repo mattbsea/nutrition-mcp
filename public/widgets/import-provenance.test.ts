@@ -3,7 +3,7 @@
 // file carries the provenance_version marker, and the importer keeps the labels
 // only then. Same evaluation technique as import-saturated.test.ts.
 import { test, expect } from "bun:test";
-import type { MealInput, MealInsertResult, Meal } from "../../src/supabase";
+import type { MealInput, MealInsertResult, Meal } from "../../src/db/repo";
 import { runImport, type ImportDeps } from "../../src/import";
 import { buildMealsCsv } from "../../src/export";
 import { parseCsv } from "../../src/csv";

@@ -18,7 +18,7 @@ import {
     transFatExtra,
 } from "../src/saturated-fat.js";
 import { buildSodiumMeta, sodiumExtra } from "../src/sodium.js";
-import type { Meal } from "../src/supabase.js";
+import type { Meal } from "../src/db/repo.js";
 import {
     ADDED_SUGAR_META_KEY,
     MEAL_BREAKDOWN_TOP_N,

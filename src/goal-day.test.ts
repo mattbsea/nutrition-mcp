@@ -7,7 +7,7 @@ import {
 } from "./goal-day.js";
 import { localClock } from "./meal-times.js";
 import type { MealItemValues } from "./meal-items.js";
-import type { Meal } from "./supabase.js";
+import type { Meal } from "./db/repo.js";
 
 let seq = 0;
 function meal(over: Partial<Meal> = {}): Meal {

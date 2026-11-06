@@ -9,7 +9,7 @@
 import { buildAddedSugarMeta } from "../src/added-sugar.js";
 import { buildSaturatedFatMeta } from "../src/saturated-fat.js";
 import { buildSodiumMeta } from "../src/sodium.js";
-import type { Meal } from "../src/supabase.js";
+import type { Meal } from "../src/db/repo.js";
 import {
     ACTIVITY_META_KEY,
     ADDED_SUGAR_META_KEY,

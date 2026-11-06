@@ -1,45 +1,27 @@
 // HTTP half of Apple Health sync via an iOS Shortcut (the pure rules are in
-// src/health-sync.ts, persistence in src/health-sync-store.ts):
+// src/health-sync.ts, persistence in src/db/health-store.ts):
 //
-//   POST /api/v1/health-sync/start     the shortcut starts pairing
-//   GET  /health-sync/connect/:id      Safari, on the phone: into the sign-in
-//   GET  /health-sync/callback         sign-in done: hand a claim code back
-//   POST /api/v1/health-sync/claim     the shortcut trades it for a link token
 //   GET  /api/v1/health-sync/pending   closed days to log into Apple Health
 //   POST /api/v1/health-sync/ack       what the shortcut actually logged
 //   POST /api/v1/health-sync/revoke    disconnect (either shortcut's link)
 //   POST /api/v1/health-sync/activity  the opt-in activity shortcut sends
 //                                      its Active Energy day totals
 //
-// Two shortcuts pair through the same flow. /start's `kind` ("health", the
-// default, or "activity") is kept on the pending row; the callback reopens
-// that kind's shortcut by name, and /claim makes that kind's link —
-// health_sync_links or health_activity_links. The two links are separate, so
-// a token is accepted only on its own kind's routes (/revoke takes either).
-//
-// Pairing makes this server an OAuth client of itself (HEALTH_SYNC_CLIENT in
-// src/oauth-store.ts): /connect sends the browser to the ordinary /authorize
-// with a PKCE challenge whose verifier only the server holds, so the whole
-// hardened sign-in — password, Google, the browser-binding cookie, the
-// consent notice — is reused unchanged, and /callback redeems the code
-// straight from the OAuth store rather than at /token.
+// STEP A2 STATE: the OAuth pairing flow (start/connect/callback/claim) is gone
+// and this router is NOT MOUNTED; src/index.ts answers every health-sync path
+// with a 501 {ok:false,error:"not_available_yet"} until step B swaps the link
+// token auth below for the configured shortcut_key and mounts it. The handlers
+// and their tests are kept so B only changes the auth and the setup.
 //
 // The API answers in one envelope: every body has `ok`, and a failure is
 // `{ ok: false, error, message, ref? }` with `error` from a fixed vocabulary
 // and `message` written for the person reading the shortcut's alert. Every
-// handler catches its own errors, so nothing here reaches app.onError, and
-// every call writes exactly one `[health-sync] route=… result=…` line, which
-// never carries a user id, token, code, hash, connect id or email.
-//
-// Mounted at "/" by src/index.ts, so — exactly as in createOAuthRouter — no
-// middleware here is registered on "*": a sub-app's wildcard middleware would
-// run on every path of the parent app.
+// handler catches its own errors, and every call writes exactly one
+// `[health-sync] route=… result=…` line, which never carries a token, hash or
+// secret path.
 import { Hono, type Context, type Next } from "hono";
 import {
-    HEALTH_SYNC_CLAIM_TTL_MINUTES,
-    HEALTH_SYNC_CONNECT_TTL_MINUTES,
     HEALTH_SYNC_LEASE_SECONDS,
-    HEALTH_SYNC_SHORTCUT_NAME,
     HEALTH_SYNC_TOKEN_PREFIX,
     ackWindow,
     applyAck,
@@ -51,11 +33,8 @@ import {
     looksLikeHealthSyncToken,
     offeringWindow,
     parseAckBody,
-    parseClaimBody,
-    parseStartBody,
     planPending,
     shouldTouchLink,
-    syncStartDate,
     type DayValues,
     type HealthSyncField,
     type HealthSyncMeal,
@@ -69,27 +48,23 @@ import {
     type ActivityWrite,
 } from "./health-activity-sync.js";
 import {
-    createSupabaseHealthActivityLinkStore,
-    createSupabaseHealthSyncStore,
+    activityCreditPctFromProfile,
+    createSqliteHealthActivityLinkStore,
+    createSqliteHealthSyncStore,
+    getMealsInRange,
+    getProfile,
+    getWaterInRange,
+    syncHealthActiveCalories,
+    timezoneFromProfile,
     type HealthActivityLinkRow,
     type HealthActivityLinkStore,
     type HealthSyncConnectKind,
     type HealthSyncDayRow,
     type HealthSyncLinkRow,
     type HealthSyncStore,
-} from "./health-sync-store.js";
-import {
-    HEALTH_SYNC_CLIENT_ID,
-    createSupabaseOAuthStore,
-    healthSyncCallbackUrl,
-    type OAuthStore,
-} from "./oauth-store.js";
-import { pkceS256, verifierMatchesChallenge } from "./oauth-validate.js";
-import { issuerFor } from "./discovery.js";
-import { getBaseUrl } from "./url.js";
-import { newOpaqueToken } from "./token-hash.js";
+} from "./db/repo.js";
 import { newErrorRef } from "./errors.js";
-import { getClientIp, recordAuthFailure } from "./middleware.js";
+import { getClientIp, recordAuthFailure } from "./perimeter.js";
 import {
     checkAuthRateLimit,
     checkHealthSyncRateLimit,
@@ -99,20 +74,6 @@ import {
     noteHealthSyncClaimFailure,
     type RateLimitResult,
 } from "./rate-limit.js";
-import {
-    activityCreditPctFromProfile,
-    getMealsInRange,
-    getProfile,
-    getWaterInRange,
-    syncHealthActiveCalories,
-    timezoneFromProfile,
-} from "./supabase.js";
-import {
-    healthSyncCopyFor,
-    type HealthSyncErrorKind,
-} from "./copy/health-sync.js";
-import { HTML_LANG, SITE, SITE_LOCALES, type SiteLocale } from "./routes.js";
-
 const API = "/api/v1/health-sync";
 
 /** Paths this router owns. src/index.ts keeps the global CORS middleware off
@@ -127,47 +88,10 @@ export function isHealthSyncPath(path: string): boolean {
     );
 }
 
-/** The path the access log prints. A connect link's id is a live pairing
- *  secret for 30 minutes — whoever opens it first gets to sign in to it — so
- *  the runtime log never holds one; every other path is printed as is. */
-export function accessLogPath(path: string): string {
-    return path.startsWith("/health-sync/connect/")
-        ? "/health-sync/connect/:id"
-        : path;
-}
-
-/**
- * The origin /start's connect link and /claim's `site` name: where the
- * shortcut opens Safari, and where it sends its link token from then on.
- * Never the request's own host — getBaseUrl trusts x-forwarded-host, and the
- * token's destination must not be decided by a request header. The canonical
- * SITE, unless PUBLIC_BASE_URL names another origin (the dev deploy, local
- * development, a self-hosted fork); a value that is not a bare http(s)
- * origin is ignored.
- */
-export function configuredSite(
-    env: string | undefined = process.env.PUBLIC_BASE_URL,
-): string {
-    const raw = env?.trim().replace(/\/+$/, "");
-    if (!raw) return SITE;
-    try {
-        const u = new URL(raw);
-        if (
-            (u.protocol === "https:" || u.protocol === "http:") &&
-            u.origin === raw
-        ) {
-            return u.origin;
-        }
-    } catch {
-        // fall through
-    }
-    return SITE;
-}
-
 // ---------- dependencies ----------
 
 /** The user data /pending and /claim read. Injectable so the route tests run
- *  on fakes; the default is supabase.ts. */
+ *  on fakes; the default is src/db/repo.ts. */
 export interface HealthSyncData {
     /** The profile's own timezone, null when never set (no row, or a row
      *  whose timezone is null). */
@@ -188,7 +112,7 @@ export interface HealthSyncData {
     ): Promise<HealthSyncWater[]>;
 }
 
-export const supabaseHealthSyncData: HealthSyncData = {
+export const repoHealthSyncData: HealthSyncData = {
     async getProfileTimezone(userId) {
         return timezoneFromProfile(await getProfile(userId));
     },
@@ -210,7 +134,7 @@ export interface HealthActivityData {
     ): Promise<number>;
 }
 
-export const supabaseHealthActivityData: HealthActivityData = {
+export const repoHealthActivityData: HealthActivityData = {
     async getActivityProfile(userId) {
         const profile = await getProfile(userId);
         return {
@@ -225,12 +149,8 @@ export interface HealthSyncRouterDeps {
     store?: HealthSyncStore;
     activityStore?: HealthActivityLinkStore;
     activityData?: HealthActivityData;
-    /** Only consumeAuthCode is used: the callback redeems its own codes. */
-    oauthStore?: Pick<OAuthStore, "consumeAuthCode">;
     data?: HealthSyncData;
     now?: () => number;
-    /** The origin named by /start and /claim; configuredSite() by default. */
-    site?: string;
 }
 
 // ---------- envelope, logging ----------
@@ -401,148 +321,6 @@ async function readJson(c: Context<Env>): Promise<{ value: unknown } | null> {
     }
 }
 
-// ---------- HTML pages (connect error, callback) ----------
-
-/** The best SITE_LOCALES match for an Accept-Language header, else "en". */
-export function localeFromAcceptLanguage(
-    header: string | undefined,
-): SiteLocale {
-    if (!header) return "en";
-    const ranked = header
-        .split(",")
-        .map((part, i) => {
-            const [tag, ...params] = part.trim().split(";");
-            const qParam = params.find((p) => p.trim().startsWith("q="));
-            const q = qParam ? Number(qParam.trim().slice(2)) : 1;
-            return {
-                base: (tag ?? "").trim().toLowerCase().split("-")[0] ?? "",
-                q: Number.isFinite(q) ? q : 0,
-                i,
-            };
-        })
-        .filter((x) => x.q > 0 && x.base !== "")
-        .sort((a, b) => b.q - a.q || a.i - b.i);
-    for (const { base } of ranked) {
-        const hit = SITE_LOCALES.find((l) => l === base);
-        if (hit) return hit;
-    }
-    return "en";
-}
-
-function escapeHtml(s: string): string {
-    return s
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#39;");
-}
-
-// These pages load nothing: no script, no font, no analytics, no image. The
-// site-wide CSP in src/index.ts allows far more (analytics, Google Fonts), so
-// each page carries its own and the security-headers middleware, which only
-// fills a missing one, leaves it alone.
-const PAGE_CSP =
-    "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
-
-const PAGE_STYLE = `
-:root{color-scheme:light dark;--bg:#eef2f6;--card:#ffffffd9;--ink:#1d2733;--muted:#5b6878;--accent:#2f9e5b;--accent-ink:#fff;--line:#d8e0ea}
-@media (prefers-color-scheme:dark){:root{--bg:#10151b;--card:#1a222bd9;--ink:#e6edf4;--muted:#9aa8b8;--accent:#46c27a;--accent-ink:#08130c;--line:#2a3542}}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px 16px;background:var(--bg);color:var(--ink);font:500 17px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-main{width:100%;max-width:440px;background:var(--card);border:1px solid var(--line);border-radius:28px;padding:32px 28px;text-align:center}
-h1{font-size:24px;line-height:1.25;margin:0 0 12px;font-weight:750}
-p{margin:0 0 16px;color:var(--muted)}
-.btn{display:inline-block;margin:8px 0 16px;padding:14px 28px;border-radius:999px;background:var(--accent);color:var(--accent-ink);font-weight:700;text-decoration:none}
-.note{font-size:14px;margin:0}
-`;
-
-function renderPage(
-    locale: SiteLocale,
-    page: {
-        title: string;
-        heading: string;
-        body: string;
-        /** A same-href button, and an immediate meta-refresh to it. */
-        go?: { href: string; label: string; note: string };
-    },
-): string {
-    const go = page.go;
-    const refresh = go
-        ? `\n<meta http-equiv="refresh" content="0;url=${escapeHtml(go.href)}">`
-        : "";
-    const action = go
-        ? `\n<a class="btn" href="${escapeHtml(go.href)}">${escapeHtml(go.label)}</a>\n<p class="note">${escapeHtml(go.note)}</p>`
-        : "";
-    return `<!doctype html>
-<html lang="${HTML_LANG[locale]}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow">
-<meta name="referrer" content="no-referrer">${refresh}
-<title>${escapeHtml(page.title)} — Nutrition MCP</title>
-<style>${PAGE_STYLE}</style>
-</head>
-<body>
-<main>
-<h1>${escapeHtml(page.heading)}</h1>
-<p>${escapeHtml(page.body)}</p>${action}
-</main>
-</body>
-</html>
-`;
-}
-
-const PAGE_HEADERS = {
-    "Content-Security-Policy": PAGE_CSP,
-    "Cache-Control": "no-store",
-    "X-Robots-Tag": "noindex, nofollow",
-} as const;
-
-function errorPage(
-    c: Context<Env>,
-    status: 404 | 410 | 429 | 400 | 500 | 503,
-    kind: HealthSyncErrorKind,
-    result: string,
-) {
-    c.get("hsNote").result = result;
-    const locale = localeFromAcceptLanguage(c.req.header("accept-language"));
-    const msg = healthSyncCopyFor(locale).errors[kind];
-    return c.html(renderPage(locale, msg), status, PAGE_HEADERS);
-}
-
-/** The exact name of the shortcut a connect of `kind` reopens. */
-export function shortcutNameFor(kind: HealthSyncConnectKind): string {
-    return kind === "activity"
-        ? HEALTH_ACTIVITY_SHORTCUT_NAME
-        : HEALTH_SYNC_SHORTCUT_NAME;
-}
-
-/** The URL that runs the shortcut with the claim code as its text input. */
-export function shortcutRunUrl(
-    claimCode: string,
-    kind: HealthSyncConnectKind = "health",
-): string {
-    return `shortcuts://run-shortcut?name=${encodeURIComponent(shortcutNameFor(kind))}&input=text&text=${encodeURIComponent(claimCode)}`;
-}
-
-/** /start's `kind`: absent or null is "health"; anything else is refused, so
- *  a shortcut newer than the server is told so instead of silently getting
- *  the other kind's pairing. */
-export function parseConnectKind(body: unknown): HealthSyncConnectKind | null {
-    if (typeof body !== "object" || body === null || Array.isArray(body))
-        return "health";
-    const kind = (body as Record<string, unknown>).kind;
-    if (kind === undefined || kind === null || kind === "health")
-        return "health";
-    if (kind === "activity") return "activity";
-    return null;
-}
-
-// ---------- router ----------
-
-const OPAQUE_ID = /^[A-Za-z0-9_-]{20,200}$/;
 const MINUTE_MS = 60_000;
 
 function toLedger(row: HealthSyncDayRow): LedgerRow {
@@ -623,14 +401,12 @@ async function recordOffers(
 
 export function createHealthSyncRouter(deps: HealthSyncRouterDeps = {}) {
     const router = new Hono<Env>();
-    const store = deps.store ?? createSupabaseHealthSyncStore();
+    const store = deps.store ?? createSqliteHealthSyncStore();
     const activityStore =
-        deps.activityStore ?? createSupabaseHealthActivityLinkStore();
-    const activityData = deps.activityData ?? supabaseHealthActivityData;
-    const oauthStore = deps.oauthStore ?? createSupabaseOAuthStore();
-    const data = deps.data ?? supabaseHealthSyncData;
+        deps.activityStore ?? createSqliteHealthActivityLinkStore();
+    const activityData = deps.activityData ?? repoHealthActivityData;
+    const data = deps.data ?? repoHealthSyncData;
     const now = deps.now ?? Date.now;
-    const site = deps.site ?? configuredSite();
 
     // One log line per call, written after the response is built. The note is
     // filled in by whichever branch answered; a throw that escaped a handler
@@ -645,24 +421,6 @@ export function createHealthSyncRouter(deps: HealthSyncRouterDeps = {}) {
             if (note.result === "ok") console.log(line);
             else console.warn(line);
         }
-    };
-
-    // Per-IP limit for the unauthenticated JSON calls, on the same bucket as
-    // the OAuth endpoints, in the envelope.
-    const perIpLimit = async (c: Context<Env>, next: Next) => {
-        const r = checkAuthRateLimit(getClientIp(c));
-        if (!r.allowed) return rateLimited(c, r);
-        await next();
-    };
-
-    // The same per-IP limit for the two browser pages, answered as a page.
-    const perIpLimitPage = async (c: Context<Env>, next: Next) => {
-        const r = checkAuthRateLimit(getClientIp(c));
-        if (!r.allowed) {
-            c.header("Retry-After", String(r.retryAfterSeconds ?? 60));
-            return errorPage(c, 429, "generic", "rate_limited");
-        }
-        await next();
     };
 
     // An IP banned for repeated auth failures (here or at /mcp — the strikes
@@ -800,349 +558,6 @@ export function createHealthSyncRouter(deps: HealthSyncRouterDeps = {}) {
     const linkAuth = tokenAuth(["health"]);
     const activityAuth = tokenAuth(["activity"]);
     const anyLinkAuth = tokenAuth(["health", "activity"]);
-
-    // ---- POST /start ----
-    //
-    // The process-wide cap is a trade-off, kept on purpose: it bounds the
-    // pending rows a caller rotating x-forwarded-for can make the database
-    // write, at the price that such a caller can hold off NEW pairings while
-    // it keeps the cap full. Nothing else is affected — existing links sync
-    // through their own per-user bucket, and a refused /start is simply
-    // retried by the user — and pairing is rare, so the price is small.
-    router.post(`${API}/start`, logged("start"), perIpLimit, async (c) => {
-        try {
-            const global = checkHealthSyncStartGlobalLimit();
-            if (!global.allowed) return rateLimited(c, global);
-
-            const json = await readJson(c);
-            if (!json) {
-                return fail(
-                    c,
-                    400,
-                    "bad_request",
-                    "The request body must be JSON.",
-                );
-            }
-            const kind = parseConnectKind(json.value);
-            if (kind === null) {
-                return fail(
-                    c,
-                    400,
-                    "bad_request",
-                    'kind must be "health" or "activity". This shortcut may be newer than the server; try again later.',
-                );
-            }
-            const parsed = parseStartBody(json.value);
-            if (!parsed.ok) {
-                return fail(c, 400, "bad_request", parsed.message);
-            }
-
-            const connectId = newOpaqueToken();
-            const deviceSecret = newOpaqueToken();
-            // A verifier only this server ever holds: /connect sends its S256
-            // challenge to /authorize, and /callback checks the code against
-            // it. Stored as-is (see the migration header) — a hash could not
-            // be turned back into the challenge.
-            const pkceVerifier = newOpaqueToken();
-            const ttlSeconds = HEALTH_SYNC_CONNECT_TTL_MINUTES * 60;
-            await io(
-                store.createPending({
-                    kind,
-                    connectId,
-                    deviceSecret,
-                    pkceVerifier,
-                    // The activity shortcut writes nothing to Apple Health,
-                    // so it carries no fields and no backfill.
-                    fields: kind === "activity" ? [] : parsed.value.fields,
-                    tz: parsed.value.tz,
-                    backfillDays:
-                        kind === "activity" ? 0 : parsed.value.backfill_days,
-                    expiresAt: new Date(
-                        now() + ttlSeconds * 1000,
-                    ).toISOString(),
-                }),
-            );
-            return ok(c, {
-                connect_url: `${site}/health-sync/connect/${connectId}`,
-                device_secret: deviceSecret,
-                expires_in: ttlSeconds,
-            });
-        } catch (err) {
-            return failFromError(c, err);
-        }
-    });
-
-    // ---- GET /health-sync/connect/:id ----
-    router.get(
-        "/health-sync/connect/:id",
-        logged("connect"),
-        perIpLimitPage,
-        async (c) => {
-            try {
-                const connectId = c.req.param("id") ?? "";
-                if (!OPAQUE_ID.test(connectId)) {
-                    return errorPage(c, 404, "expired", "expired");
-                }
-                const pending = await io(
-                    store.getPendingByConnectId(connectId, new Date(now())),
-                );
-                // Unknown, lapsed, or already through sign-in once (its
-                // verifier is cleared when the claim code is minted): the
-                // link works once.
-                if (
-                    !pending ||
-                    pending.claim_expires_at !== null ||
-                    !pending.pkce_verifier
-                ) {
-                    return errorPage(c, 410, "expired", "expired");
-                }
-                const base = getBaseUrl(c);
-                const params = new URLSearchParams({
-                    response_type: "code",
-                    client_id: HEALTH_SYNC_CLIENT_ID,
-                    redirect_uri: healthSyncCallbackUrl(base),
-                    state: connectId,
-                    code_challenge: pkceS256(pending.pkce_verifier),
-                    code_challenge_method: "S256",
-                });
-                // /authorize itself falls back to English for a locale whose
-                // login page is not built, so any SITE_LOCALES match is safe
-                // to pass; English is the default and is omitted.
-                const locale = localeFromAcceptLanguage(
-                    c.req.header("accept-language"),
-                );
-                if (locale !== "en") params.set("locale", locale);
-                c.get("hsNote").result = "ok";
-                c.header("Cache-Control", "no-store");
-                return c.redirect(`/authorize?${params.toString()}`, 302);
-            } catch (err) {
-                const ref = newErrorRef();
-                const note = c.get("hsNote");
-                note.ref = ref;
-                note.error = errorText(
-                    err instanceof Unavailable ? err.inner : err,
-                );
-                return errorPage(
-                    c,
-                    err instanceof Unavailable ? 503 : 500,
-                    "generic",
-                    err instanceof Unavailable ? "unavailable" : "server_error",
-                );
-            }
-        },
-    );
-
-    // ---- GET /health-sync/callback ----
-    //
-    // Why a claim code, and why it is only ever inside the shortcuts:// URL:
-    // whoever started the flow holds the device secret /start returned, and
-    // whoever finished sign-in in this browser gets the claim code — /claim
-    // needs both. If an attacker starts pairing and tricks someone into
-    // signing in on the connect link, the attacker holds the device secret
-    // but never sees the claim code (it goes only to the victim's browser,
-    // which hands it to the victim's own shortcut); the victim's phone holds
-    // the claim code but not the attacker's device secret. Neither half
-    // alone gets a link token. So the code is never printed on the page,
-    // never logged, and the response is no-store.
-    router.get(
-        "/health-sync/callback",
-        logged("callback"),
-        perIpLimitPage,
-        async (c) => {
-            try {
-                const state = c.req.query("state") ?? "";
-                const code = c.req.query("code") ?? "";
-                if (!OPAQUE_ID.test(state)) {
-                    return errorPage(c, 400, "signInFailed", "bad_request");
-                }
-                const at = new Date(now());
-                const pending = await io(
-                    store.getPendingByConnectId(state, at),
-                );
-                if (
-                    !pending ||
-                    pending.claim_expires_at !== null ||
-                    !pending.pkce_verifier
-                ) {
-                    return errorPage(c, 410, "expired", "expired");
-                }
-                // An error redirect from /authorize (e.g. a refused
-                // resource), or no code at all: sign-in did not finish.
-                if (c.req.query("error") !== undefined || code === "") {
-                    return errorPage(c, 400, "signInFailed", "sign_in_failed");
-                }
-                const base = getBaseUrl(c);
-                const iss = c.req.query("iss");
-                if (iss !== undefined && iss !== issuerFor(base)) {
-                    return errorPage(c, 400, "signInFailed", "sign_in_failed");
-                }
-
-                // Single-use whatever happens next: a code that fails a check
-                // below is spent, exactly as at /token.
-                const auth = await io(oauthStore.consumeAuthCode(code));
-                if (
-                    !auth ||
-                    auth.client_id !== HEALTH_SYNC_CLIENT_ID ||
-                    auth.redirect_uri !== healthSyncCallbackUrl(base) ||
-                    !verifierMatchesChallenge(
-                        pending.pkce_verifier,
-                        auth.code_challenge,
-                    )
-                ) {
-                    return errorPage(c, 400, "signInFailed", "sign_in_failed");
-                }
-
-                const claimCode = newOpaqueToken();
-                const claimed = await io(
-                    store.setPendingClaim(
-                        state,
-                        claimCode,
-                        auth.user_id,
-                        new Date(
-                            at.getTime() +
-                                HEALTH_SYNC_CLAIM_TTL_MINUTES * MINUTE_MS,
-                        ).toISOString(),
-                        at,
-                    ),
-                );
-                if (!claimed) {
-                    return errorPage(c, 410, "expired", "expired");
-                }
-
-                c.get("hsNote").result = "ok";
-                const locale = localeFromAcceptLanguage(
-                    c.req.header("accept-language"),
-                );
-                const copy = healthSyncCopyFor(locale).opening;
-                return c.html(
-                    renderPage(locale, {
-                        title: copy.title,
-                        heading: copy.heading,
-                        body: copy.body,
-                        go: {
-                            href: shortcutRunUrl(claimCode, pending.kind),
-                            label: copy.button,
-                            note: copy.note,
-                        },
-                    }),
-                    200,
-                    PAGE_HEADERS,
-                );
-            } catch (err) {
-                const ref = newErrorRef();
-                const note = c.get("hsNote");
-                note.ref = ref;
-                note.error = errorText(
-                    err instanceof Unavailable ? err.inner : err,
-                );
-                return errorPage(
-                    c,
-                    err instanceof Unavailable ? 503 : 500,
-                    "generic",
-                    err instanceof Unavailable ? "unavailable" : "server_error",
-                );
-            }
-        },
-    );
-
-    // ---- POST /claim ----
-    router.post(
-        `${API}/claim`,
-        logged("claim"),
-        banGuard,
-        perIpLimit,
-        async (c) => {
-            try {
-                const json = await readJson(c);
-                if (!json) {
-                    return fail(
-                        c,
-                        400,
-                        "bad_request",
-                        "The request body must be JSON.",
-                    );
-                }
-                const parsed = parseClaimBody(json.value);
-                if (!parsed.ok) {
-                    return fail(c, 400, "bad_request", parsed.message);
-                }
-
-                const at = new Date(now());
-                const pending = await io(
-                    store.consumeClaim(
-                        parsed.value.claim_code,
-                        parsed.value.device_secret,
-                        at,
-                    ),
-                );
-                if (!pending || !pending.user_id) {
-                    // A guess at the pair: a strike for this IP. Failures are
-                    // also counted process-wide, as an alert in the log line
-                    // rather than a gate: a gate any caller rotating
-                    // x-forwarded-for could fill would switch pairing off for
-                    // everyone, and it would buy nothing — a claim needs two
-                    // independent 256-bit secrets, which no volume of guesses
-                    // finds.
-                    recordAuthFailure(c);
-                    if (!noteHealthSyncClaimFailure().allowed) {
-                        c.get("hsNote").alert = "claim_failures_high";
-                    }
-                    return fail(c, 400, "invalid_code", MESSAGES.invalid_code);
-                }
-                clearAuthFailures(getClientIp(c));
-                const userId = pending.user_id;
-
-                if (pending.kind === "activity") {
-                    const token = `${HEALTH_SYNC_TOKEN_PREFIX}${newOpaqueToken()}`;
-                    await io(
-                        activityStore.replaceActivityLink(
-                            userId,
-                            {
-                                fallbackTz: pending.tz,
-                                expiresAt: linkExpiresAt(at, at).toISOString(),
-                            },
-                            token,
-                        ),
-                    );
-                    return ok(c, { token, site });
-                }
-
-                // The start date only: which zone each day is bucketed in is
-                // decided again on every /pending. A profile read failing
-                // here would otherwise throw away a claim already spent, so
-                // it falls back to the phone's zone, at worst one day off.
-                let profileTz: string | null = null;
-                try {
-                    profileTz = await data.getProfileTimezone(userId);
-                } catch {
-                    profileTz = null;
-                }
-                const { tz } = effectiveTimezone(profileTz, pending.tz);
-                const token = `${HEALTH_SYNC_TOKEN_PREFIX}${newOpaqueToken()}`;
-                await io(
-                    store.replaceLink(
-                        userId,
-                        {
-                            fields: pending.fields,
-                            fallbackTz: pending.tz,
-                            syncStartDate: syncStartDate(
-                                at,
-                                tz,
-                                pending.backfill_days,
-                            ),
-                            expiresAt: linkExpiresAt(at, at).toISOString(),
-                        },
-                        token,
-                    ),
-                );
-                // Where the shortcut sends the token from now on: the
-                // configured origin, never one a request header named.
-                return ok(c, { token, site });
-            } catch (err) {
-                return failFromError(c, err);
-            }
-        },
-    );
 
     // ---- GET /pending ----
     router.get(

@@ -4,7 +4,7 @@
 // technique as import-time.test.ts: the assembled widget script is run with
 // only the `initWidget({…})` bootstrap cut off.
 import { test, expect } from "bun:test";
-import type { MealInput, MealInsertResult, Meal } from "../../src/supabase";
+import type { MealInput, MealInsertResult, Meal } from "../../src/db/repo";
 import { runImport, type ImportDeps } from "../../src/import";
 import { buildMealsCsv } from "../../src/export";
 import { parseCsv } from "../../src/csv";
