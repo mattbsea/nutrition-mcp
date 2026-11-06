@@ -1,4 +1,5 @@
 /** Whole-owner operations: delete everything, export file naming. */
+import { getDb } from "./conn.js";
 import { tx } from "./util.js";
 
 /**
@@ -51,6 +52,11 @@ export async function deleteAllUserData(userId: string): Promise<void> {
                 db.query(`DELETE FROM ${table} WHERE user_id = ?`).run(userId);
             }
         });
+        // The deleted rows are still in the write-ahead log until it is
+        // checkpointed. TRUNCATE folds it into the database file (where
+        // secure_delete has already zeroed the freed pages) and empties it, so
+        // no copy of the deleted text remains in nutrition.db or its -wal.
+        getDb().exec("PRAGMA wal_checkpoint(TRUNCATE)");
     } catch (error) {
         throw new Error(
             `Failed to delete user data: ${error instanceof Error ? error.message : String(error)}`,

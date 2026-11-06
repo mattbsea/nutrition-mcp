@@ -123,6 +123,12 @@ export function openDb(path: string = defaultDbPath()): Database {
         // support concurrent writers. External tools should open the file
         // read-only.
         db.exec("PRAGMA busy_timeout = 5000");
+        // Deleted rows are overwritten with zeros instead of lingering in free
+        // pages. Cost: every DELETE/UPDATE touches the freed bytes, a few
+        // percent more write work, irrelevant at this data size. Together with
+        // the WAL checkpoint after delete_account (db/account.ts) it is what makes
+        // "permanently deleted" true of the files on disk.
+        db.exec("PRAGMA secure_delete = ON");
         if (path !== ":memory:") {
             db.exec("PRAGMA journal_mode = WAL");
             db.exec("PRAGMA synchronous = NORMAL");
