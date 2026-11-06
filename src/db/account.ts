@@ -1,0 +1,60 @@
+/** Whole-owner operations: delete everything, export file naming. */
+import { tx } from "./util.js";
+
+/**
+ * File name of the whole-account export archive, one per owner (each export
+ * overwrites the last). With the cloud build this was a Storage key; the
+ * add-on will use it as a path under /data/exports (step A2/A3).
+ */
+export function exportArchivePath(userId: string): string {
+    return `${userId}/nutrition-mcp-export.zip`;
+}
+
+/** Every export file name an export may have left for this owner, current and
+ *  historical. Add, never replace: a name missed here survives deletion. */
+export function exportStoragePaths(userId: string): string[] {
+    return [exportArchivePath(userId), `${userId}/meals.csv`];
+}
+
+/**
+ * Tables holding owner data, children before parents. (Foreign keys would
+ * cascade anyway; naming every table keeps each one in the deletion record.)
+ * The shared food_cache holds public reference data and is kept.
+ */
+const OWNER_TABLES = [
+    "health_activity_links",
+    "health_sync_links",
+    "health_sync_days",
+    "health_sync_pending",
+    "water_log",
+    "active_calories_log",
+    "weight_log",
+    "body_measurement_log",
+    "nutrition_goals_history",
+    "nutrition_goals",
+    "profiles",
+    "meal_items",
+    "saved_meal_items",
+    "saved_meals",
+    "meals",
+] as const;
+
+/**
+ * Deletes every row of this owner in ONE transaction: all or nothing. Export
+ * archives live on disk, outside the database; removing the files named by
+ * exportStoragePaths is the caller's job (and cannot be part of the
+ * transaction).
+ */
+export async function deleteAllUserData(userId: string): Promise<void> {
+    try {
+        tx((db) => {
+            for (const table of OWNER_TABLES) {
+                db.query(`DELETE FROM ${table} WHERE user_id = ?`).run(userId);
+            }
+        });
+    } catch (error) {
+        throw new Error(
+            `Failed to delete user data: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    }
+}
