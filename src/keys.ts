@@ -8,6 +8,11 @@
  *                 in the environment wins; otherwise generated like mcp_key.
  *                 It must differ from the MCP key: a leaked shortcut must not
  *                 open the MCP endpoint or the other way round.
+ *  - dashboard_password  the single dashboard login password. DASHBOARD_PASSWORD
+ *                 in the environment wins (never written to disk); otherwise a
+ *                 random one is generated ONCE and kept here so the owner can
+ *                 read it. At least 12 characters, any characters.
+ *  - session_secret  HMAC key that signs the dashboard session cookie.
  *  - export_secret HMAC key that signs export download links.
  *
  * The file is read-modify-written so later steps can add their own keys
@@ -37,6 +42,12 @@ export interface KeyStore {
     shortcutKeyFromEnv: boolean;
     shortcutKeyGenerated: boolean;
     exportSecret: string;
+    /** The dashboard login password in force (env override or persisted). */
+    dashboardPassword: string;
+    dashboardPasswordFromEnv: boolean;
+    dashboardPasswordGenerated: boolean;
+    /** HMAC key for the dashboard session cookie. */
+    sessionSecret: string;
     /** Absolute path of keys.json. */
     file: string;
 }
@@ -85,6 +96,28 @@ const KEY_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 const isSecret = (v: unknown): v is string =>
     typeof v === "string" && v.length >= 16;
+
+export const MIN_PASSWORD_LENGTH = 12;
+const MAX_PASSWORD_LENGTH = 200;
+
+/** A human password: long enough, not absurd, no control characters. The
+ *  message never contains the value. */
+function assertStrongPassword(name: string, value: string): void {
+    if (value.length < MIN_PASSWORD_LENGTH) {
+        throw new Error(
+            `${name} must be at least ${MIN_PASSWORD_LENGTH} characters (got ${value.length}).`,
+        );
+    }
+    if (value.length > MAX_PASSWORD_LENGTH) {
+        throw new Error(
+            `${name} must be at most ${MAX_PASSWORD_LENGTH} characters.`,
+        );
+    }
+    // eslint-disable-next-line no-control-regex
+    if (/[\u0000-\u001f\u007f]/.test(value)) {
+        throw new Error(`${name} must not contain control characters.`);
+    }
+}
 
 /** Throws unless a user-supplied secret is long enough and path-safe. The
  *  message never contains the value. */
@@ -156,6 +189,35 @@ export function loadKeys(
         );
     }
 
+    if (!isSecret(keys.session_secret)) {
+        keys.session_secret = newSecret(32);
+        dirty = true;
+    }
+
+    // Env values are trimmed of surrounding whitespace only for the emptiness
+    // test; the password itself is used exactly as given.
+    const passwordEnv = env.DASHBOARD_PASSWORD;
+    let dashboardPassword: string;
+    let passwordGenerated = false;
+    if (passwordEnv !== undefined && passwordEnv.trim() !== "") {
+        assertStrongPassword("DASHBOARD_PASSWORD", passwordEnv);
+        dashboardPassword = passwordEnv;
+    } else if (
+        typeof keys.dashboard_password === "string" &&
+        keys.dashboard_password !== ""
+    ) {
+        assertStrongPassword(
+            "keys.json dashboard_password",
+            keys.dashboard_password,
+        );
+        dashboardPassword = keys.dashboard_password;
+    } else {
+        dashboardPassword = newSecret(18);
+        keys.dashboard_password = dashboardPassword;
+        passwordGenerated = true;
+        dirty = true;
+    }
+
     if (dirty) writeKeys(file, keys);
     return {
         mcpKey,
@@ -165,6 +227,10 @@ export function loadKeys(
         shortcutKeyFromEnv: Boolean(shortcutEnv),
         shortcutKeyGenerated: shortcutGenerated,
         exportSecret: keys.export_secret as string,
+        dashboardPassword,
+        dashboardPasswordFromEnv: Boolean(passwordEnv?.trim()),
+        dashboardPasswordGenerated: passwordGenerated,
+        sessionSecret: keys.session_secret as string,
         file,
     };
 }

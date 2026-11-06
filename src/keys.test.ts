@@ -194,4 +194,70 @@ describe("loadKeys", () => {
             /must be different secrets/,
         );
     });
+
+    describe("dashboard password and session secret", () => {
+        test("a password is generated once, persisted readable, and reused", () => {
+            const a = loadKeys(dir, {});
+            expect(a.dashboardPasswordGenerated).toBe(true);
+            expect(a.dashboardPassword.length).toBeGreaterThanOrEqual(20);
+            expect(read().dashboard_password).toBe(a.dashboardPassword);
+            const b = loadKeys(dir, {});
+            expect(b.dashboardPasswordGenerated).toBe(false);
+            expect(b.dashboardPassword).toBe(a.dashboardPassword);
+            expect(b.sessionSecret).toBe(a.sessionSecret);
+        });
+
+        test("DASHBOARD_PASSWORD wins and is never written to disk", () => {
+            const env = { DASHBOARD_PASSWORD: "correct horse battery staple" };
+            const k = loadKeys(dir, env);
+            expect(k.dashboardPassword).toBe(env.DASHBOARD_PASSWORD);
+            expect(k.dashboardPasswordFromEnv).toBe(true);
+            expect(k.dashboardPasswordGenerated).toBe(false);
+            expect(JSON.stringify(read())).not.toContain(
+                env.DASHBOARD_PASSWORD,
+            );
+            expect(read().dashboard_password).toBeUndefined();
+        });
+
+        test("a short, huge or control-character password is refused without echoing it", () => {
+            for (const [bad, re] of [
+                ["short-pw", /at least 12/],
+                ["x".repeat(201), /at most 200/],
+                ["has a newline\nin it ok", /control characters/],
+            ] as const) {
+                try {
+                    loadKeys(dir, { DASHBOARD_PASSWORD: bad });
+                    throw new Error("expected a refusal");
+                } catch (e) {
+                    expect((e as Error).message).toMatch(re);
+                    expect((e as Error).message).not.toContain(bad);
+                }
+            }
+        });
+
+        test("the session secret is stable across loads and not the other secrets", () => {
+            const a = loadKeys(dir, {});
+            expect(a.sessionSecret.length).toBeGreaterThanOrEqual(32);
+            expect(
+                new Set([
+                    a.sessionSecret,
+                    a.exportSecret,
+                    a.mcpKey,
+                    a.shortcutKey,
+                    a.dashboardPassword,
+                ]).size,
+            ).toBe(5);
+            expect(loadKeys(dir, {}).sessionSecret).toBe(a.sessionSecret);
+        });
+
+        test("a weak password already in keys.json is refused, not replaced", () => {
+            writeFileSync(
+                join(dir, "keys.json"),
+                JSON.stringify({ dashboard_password: "tiny" }),
+            );
+            expect(() => loadKeys(dir, {})).toThrow(
+                /keys.json dashboard_password must be at least 12/,
+            );
+        });
+    });
 });
