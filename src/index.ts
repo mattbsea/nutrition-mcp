@@ -21,6 +21,10 @@ import {
 } from "./export-files.js";
 import { OWNER_ID, closeDb, exportArchivePath, getDb } from "./db/repo.js";
 import { warmWidgets } from "./widgets.js";
+import {
+    createDashboardRouter,
+    type DashboardOptions,
+} from "./dashboard/routes.js";
 
 const PUBLIC_ICONS: Record<string, string> = {
     "/favicon.ico": "image/x-icon",
@@ -41,6 +45,8 @@ export interface AppOptions {
     exportSecret: () => string;
     /** DATA_DIR (export archives live under it). */
     dataDir?: string;
+    /** The login + dashboard. Absent = not mounted (the paths are plain 404s). */
+    dashboard?: Omit<DashboardOptions, "mcpKey" | "shortcutKey" | "dataDir">;
 }
 
 let shuttingDown = false;
@@ -165,7 +171,21 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
         c.body("ok", 200, { "Content-Type": "text/plain; charset=utf-8" }),
     );
 
-    // "/" is the dashboard login in step C. Until then, the generic 404.
+    // The dashboard: "/" is the login page, then the pages. Mounted last so
+    // none of its session handling can sit in front of the routes above.
+    if (opts.dashboard) {
+        app.route(
+            "/",
+            createDashboardRouter({
+                ...opts.dashboard,
+                mcpKey: opts.mcpKey,
+                shortcutKey: opts.shortcutKey,
+                dataDir: opts.dataDir,
+            }).router,
+        );
+    }
+
+    // Anything else: the one generic 404.
     app.notFound((c) => notFound(c));
 
     // Never echo error text: it can embed request URLs (the key).
@@ -183,6 +203,14 @@ function shortcutKeyLine(keys: KeyStore): string {
     if (keys.shortcutKeyGenerated)
         return `[keys] generated a new shortcut key and saved it to ${keys.file} (field "shortcut_key"); the Apple Health shortcuts send it as a bearer token`;
     return `[keys] shortcut key loaded from ${keys.file} (field "shortcut_key")`;
+}
+
+function dashboardPasswordLine(keys: KeyStore): string {
+    if (keys.dashboardPasswordFromEnv)
+        return "[keys] dashboard password taken from the DASHBOARD_PASSWORD environment variable (add-on option dashboard_password)";
+    if (keys.dashboardPasswordGenerated)
+        return `[keys] generated a dashboard password and saved it to ${keys.file} (field "dashboard_password"); read it there to sign in`;
+    return `[keys] dashboard password loaded from ${keys.file} (field "dashboard_password")`;
 }
 
 function startupKeyLine(keys: KeyStore): string {
@@ -206,9 +234,12 @@ async function boot(): Promise<Hono<{ Bindings: ServerEnv }>> {
         keys.mcpKey,
         keys.shortcutKey,
         keys.exportSecret,
+        keys.dashboardPassword,
+        keys.sessionSecret,
     ]);
     console.log(startupKeyLine(keys));
     console.log(shortcutKeyLine(keys));
+    console.log(dashboardPasswordLine(keys));
     if (trustProxy())
         console.log(
             "[net] TRUST_PROXY=1: using the rightmost X-Forwarded-For entry",
@@ -226,6 +257,10 @@ async function boot(): Promise<Hono<{ Bindings: ServerEnv }>> {
         shortcutKey: () => keys.shortcutKey,
         exportSecret: () => keys.exportSecret,
         dataDir: dataDir(),
+        dashboard: {
+            password: () => keys.dashboardPassword,
+            sessionSecret: () => keys.sessionSecret,
+        },
     });
 }
 
