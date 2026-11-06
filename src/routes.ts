@@ -1,5 +1,5 @@
 // Route and locale data for the public site — deliberately free of any
-// import that reaches for Supabase credentials or has other side effects
+// import that reaches for database access or has other side effects
 // (unlike src/index.ts and src/export.ts), so this module is safe to import
 // directly from src/index.ts, the site generators under scripts/, AND
 // tests. Before this existed, src/alt-pages.test.ts had to regex-scrape

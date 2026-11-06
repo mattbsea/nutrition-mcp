@@ -2,7 +2,7 @@
  * The HTTP perimeter: client identification, the secret-path MCP key guard,
  * the failure rate limit, secure headers and log redaction.
  *
- * The MCP endpoint is `/mcp/<key>`. There is NO OAuth and no other credential
+ * The MCP endpoint is `/mcp/<key>`. There is no token flow and no other credential
  * on it: the 48-byte random key in the URL path is the whole authentication,
  * the pattern used for the Home Assistant and Portainer MCP servers. So the
  * rules here are strict:

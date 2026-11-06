@@ -1,5 +1,5 @@
 // Trend weight: pure helpers behind get_weight_trends' smoothed line, weekly
-// rate and long-range series. No Supabase, no mcp.ts — everything here works
+// rate and long-range series. No database, no mcp.ts — everything here works
 // on plain { weight_g, logged_at } rows and local YYYY-MM-DD dates, so it unit
 // tests with fixtures.
 //

@@ -1,8 +1,8 @@
 // Bulk meal import: row validation, timestamp resolution, per-row idempotency
 // keys, batch integrity checks, and the insert orchestration.
 //
-// All of this is deliberately free of Supabase access so it can be unit-tested
-// with plain fixtures (the export.ts / search.ts convention) — getSupabase()
+// All of this is deliberately free of database access so it can be unit-tested
+// with plain fixtures (the export.ts / search.ts convention) — the repo
 // has no injection seam. src/mcp.ts is a thin adapter that supplies `insert`
 // and `existingKeys`.
 //
@@ -911,7 +911,7 @@ export function rowContentDigest(userId: string, input: MealInput): string {
     // now on, so the keys a user's next import produces would no longer match
     // the keys their previous import wrote, and re-importing an already-imported
     // file would create a full set of duplicates instead of a clean no-op.
-    // deriveIdempotencyKey in src/supabase.ts is frozen for the same reason and
+    // deriveIdempotencyKey in src/db/repo.ts is frozen for the same reason and
     // must stay in step with this one.
     //
     // The accepted cost: two meals differing ONLY in saturated or trans fat,
@@ -1207,7 +1207,7 @@ function resultRow(
  * hosts drop the structuredContent that carries it.
  *
  * `on_error: "abort"` is validation-scoped. Writes are not transactional —
- * there is no transaction available through supabase-js here — so once writing
+ * there is no transaction available through the database driver here — so once writing
  * begins, a database failure leaves earlier rows saved. Remaining rows are
  * reported as not_attempted rather than silently omitted.
  */

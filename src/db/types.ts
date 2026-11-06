@@ -1,8 +1,4 @@
-/**
- * Row and input shapes of the SQLite persistence layer. They are the same
- * shapes src/supabase.ts and src/health-sync-store.ts declare (copied, so the
- * layer has no import edge to the Supabase modules that step A2 deletes).
- */
+/** Row and input shapes of the SQLite persistence layer. */
 import type { LengthUnit, WeightUnit, BodyMeasurementKind } from "../units.js";
 import type { DrinkUnit } from "../alcohol.js";
 import type { ActivityEntry } from "../activity.js";
@@ -13,7 +9,7 @@ import type {
 } from "../meal-items.js";
 import type { NutrientSources, SourceDetail } from "../provenance.js";
 
-// ---------- Core nutrition rows (from src/supabase.ts) ----------
+// ---------- Core nutrition rows ----------
 
 export interface Meal {
     id: string;
@@ -336,7 +332,7 @@ export type MealSnapshotGuard = Partial<
     source_detail?: unknown;
 };
 
-// ---------- Apple Health sync (from src/health-sync-store.ts) ----------
+// ---------- Apple Health sync ----------
 
 /** health_sync_pending without its hash columns. */
 export interface HealthSyncPendingRow {

@@ -28,22 +28,6 @@ describe("schema", () => {
         db.close();
     });
 
-    test("no table of the cloud-only features exists", () => {
-        const db = openDb(":memory:");
-        const names = tableNames(db);
-        for (const dropped of [
-            "oauth_tokens",
-            "refresh_tokens",
-            "auth_codes",
-            "registered_clients",
-            "oauth_clients",
-            "patreon_tokens",
-            "tool_analytics",
-        ])
-            expect(names).not.toContain(dropped);
-        db.close();
-    });
-
     test("foreign keys are enforced and user_version is current", () => {
         const db = openDb(":memory:");
         expect(

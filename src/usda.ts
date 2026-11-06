@@ -1,7 +1,7 @@
 // USDA FoodData Central client: the two read-only lookups behind search_foods
 // and get_food_macros, plus the pure rules they rest on.
 //
-// Pure (no Supabase, no HTTP, no mcp.ts import): sanitizeQuery, the nutrient
+// Pure (no database, no HTTP, no mcp.ts import): sanitizeQuery, the nutrient
 // mapping for both row shapes (search rows and detail rows), portion
 // extraction per data type, candidate trimming and the detail normalizer
 // (normalizeDetail, the UsdaNormalizer of src/usda-record.ts).
@@ -479,7 +479,7 @@ export interface UsdaCacheStore {
 }
 
 // Delegates at call time, not at module load, so a test that swaps the
-// Supabase functions still takes effect for the production store.
+// repo functions still takes effect for the production store.
 export const repoUsdaCache: UsdaCacheStore = {
     get: (fdcId) => readUsdaFoodCache(fdcId),
     put: (record, fetchedAt) => writeUsdaFoodCache(record, fetchedAt),

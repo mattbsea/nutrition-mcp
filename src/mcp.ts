@@ -399,7 +399,7 @@ Importing history from another app (MyFitnessPal, Cronometer, Lose It!, MacroFac
 // Why these live in the Zod schema and not in the handler: CLAUDE.md's rule
 // ("bounds live in the handler, not in Zod") is specifically about
 // bulk_import_meals, where a schema-level rejection fires BEFORE the handler and
-// throws away the structured per-row report, the warnings and the analytics row
+// throws away the structured per-row report, the warnings and the tool run
 // — for what is that tool's single most common caller mistake. log_meal,
 // update_meal and set_nutrition_goals have no such report to lose: their whole
 // output is the one row they just wrote. There, rejecting in the schema is
@@ -662,7 +662,7 @@ export function loggedDayAverageNote(
     return `\n\n(Daily averages are per logged day — ${loggedDays} of the ${daysInRange} days in range. get_trends averages over all ${daysInRange} calendar days instead, so its daily figures will be lower.)`;
 }
 
-// insights.ts is deliberately free of Supabase, so it cannot know about the
+// insights.ts is deliberately free of database access, so it cannot know about the
 // per-user opt-in: it renders an alcohol line whenever the data contains any
 // (see hasAnyPositive there). Zeroing the series is how the flag reaches it —
 // both computeTrends and computeWeeklyDigest suppress alcohol on an all-zero
@@ -790,7 +790,7 @@ export function mealBreakdown(
     }));
 }
 
-// MEAL_BREAKDOWN_TOP_N lives in src/widgets.ts (Supabase-free, so the widget
+// MEAL_BREAKDOWN_TOP_N lives in src/widgets.ts (database-free, so the widget
 // harness can import it too); re-exported here for existing importers.
 export { MEAL_BREAKDOWN_TOP_N };
 
@@ -2031,7 +2031,7 @@ function assertPlausibleWeight(grams: number, unit: WeightUnit): void {
 // The one knob on the three meal listings (see src/meal-listing.ts). Compact is
 // the default because a listing is almost always read to find a meal or total
 // a day, and it keeps the id update_meal / delete_meal need. Not added to the
-// analytics args: it says nothing about how a tool is failing.
+// log args: it says nothing about how a tool is failing.
 // ---------- Ingredients and saved meals (src/meal-items.ts) ----------
 
 // The item-list shape every items field shares; each tool adds what leaving
@@ -2768,9 +2768,9 @@ function assertCalendarDate(name: string, value: string): void {
 
 // Validate a start_date/end_date pair for a range tool (the *_by_date_range
 // listings and get_nutrition_summary), throwing the caller-facing message. Throwing (rather than returning text) is what routes
-// the rejection through withAnalytics as a failure with an error category,
+// the rejection through runTool as a failure with an error category,
 // the same as every other bad-argument path here. The wording is matched in
-// categorizeError (src/analytics.ts): the over-limit message deliberately
+// categorizeError (src/tool-runner.ts): the over-limit message deliberately
 // avoids "limit", which tier 3 would otherwise read as rate_limited.
 function assertDateRange(
     start: string,
@@ -3021,7 +3021,7 @@ export function registerTools(
     alcohol: AlcoholDisplay,
     // The USDA client's seams (fetch, clock, env, cache, quota state, log).
     // Production passes nothing; the default cache store reads and writes
-    // through the live supabase functions at call time. Tests inject a fetch
+    // through the live repo functions at call time. Tests inject a fetch
     // and a fresh quota state per case.
     usda: Partial<UsdaDeps> = {},
 ) {
@@ -3472,7 +3472,7 @@ export function registerTools(
                     // One profile read serves both: the timezone, and whether the
                     // user ever configured one via timezoneFromProfile (null
                     // means never set — see the Profile.timezone doc comment in
-                    // supabase.ts, #99). Rows without an explicit offset are
+                    // db/repo.ts, #99). Rows without an explicit offset are
                     // placed with it, so the import warns rather than silently
                     // guessing.
                     const profile = await getProfile(userId);
@@ -3606,10 +3606,10 @@ export function registerTools(
             // lookupBarcode's own failures (OFF down, timeout, bad config) are
             // caught below and turned into a normal (non-isError) content
             // response so the model can fall back to estimating — but that
-            // means withAnalytics never sees a thrown error. Without this flag
+            // means runTool never sees a thrown error. Without this flag
             // an OFF outage silently records as `success: true`, which is how
-            // it stayed invisible to tool_analytics entirely.
-            // Safe only because withAnalytics awaits the handler to
+            // it stayed invisible to the tool log entirely.
+            // Safe only because runTool awaits the handler to
             // completion before reading this via `outcome` below — it is not
             // read concurrently with the handler running.
             let offFailure: string | null = null;
@@ -3726,9 +3726,9 @@ export function registerTools(
             }),
         },
         async ({ query }) => {
-            // An upstream failure (a thrown UpstreamError) reaches withAnalytics
+            // An upstream failure (a thrown UpstreamError) reaches runTool
             // as an error; a pause or a refused key is a normal result, so it
-            // is flagged here for the analytics row.
+            // is flagged here for the tool run.
             let usdaFailure: string | null = null;
             return runTool(
                 "search_foods",
@@ -8752,7 +8752,7 @@ export function registerTools(
             mimeType: "text/plain",
         },
         async (uri) => {
-            // Resources don't go through withAnalytics, and the SDK forwards a
+            // Resources don't go through runTool, and the SDK forwards a
             // thrown message to the client verbatim, so this catch applies the
             // same rule: raw text is logged under a ref, never returned.
             try {
@@ -9144,9 +9144,9 @@ async function buildMcpServer(
 // (supportedVersions + capabilities + instructions) and `subscriptions/listen`
 // (refused outright below, but the SDK still reads getCapabilities() and the
 // serverInfo off the instance before refusing). Both are served from
-// newMcpServer, skipping a Supabase profile read and ~38 tool registrations.
+// newMcpServer, skipping a profile read and ~38 tool registrations.
 // server/discover is the FIRST request every negotiating client sends, so under
-// Supabase pressure it was the probe that failed — for a response that contains
+// database pressure it was the probe that failed — for a response that contains
 // nothing a registration produces.
 //
 // Safe only because a modern request cannot reach the factory with a header
@@ -9206,7 +9206,7 @@ const mcpHandler = createMcpHandler(
         // pre-check was actually worth — the factory stays cheap for a listen.
         maxSubscriptions: 0,
         // A stack for anything that might be ours, one line for what is not.
-        // The SDK routes server-factory throws — a Supabase outage inside
+        // The SDK routes server-factory throws — a database failure inside
         // getProfile, a bad icon URL, a bug in registerTools — solely to
         // onerror on BOTH legs, so a message-only line here left on-call with
         // no idea what failed. A ProtocolError is by construction a rejection

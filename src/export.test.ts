@@ -1755,7 +1755,7 @@ describe("exportAllData", () => {
         expect(entries.find((e) => e.name === "meals.csv")!.content).toContain(
             "porridge",
         );
-        // The archive holds no account, telemetry or OAuth material.
+        // The archive holds no account or telemetry material.
         expect(entries.some((e) => /account|telemetry/.test(e.name))).toBe(
             false,
         );

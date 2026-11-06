@@ -2,7 +2,7 @@
 // the field-per-line full form, and the listing renderer that keeps a response
 // inside a fixed character budget.
 //
-// Pure on purpose. No import from mcp.ts or supabase.ts (the `Meal` import is
+// Pure on purpose. No import from mcp.ts or db/repo.ts (the `Meal` import is
 // type-only and erased), so this unit-tests without the mock.module window and
 // cannot drag the server's side effects into anything that imports it. Every
 // time is rendered by slicing tz.ts's formatLocalDateTime: timezone logic lives

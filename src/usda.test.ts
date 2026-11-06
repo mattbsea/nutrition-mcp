@@ -45,9 +45,9 @@ import detailFoundation from "./__fixtures__/usda/detail-Foundation-1105073-filt
 import detailFndds from "./__fixtures__/usda/detail-Survey_FNDDS_-2709224-filtered.json";
 
 // The USDA client against injected fetch, clock, env and cache: no network, no
-// database, no mock.module. The Supabase store is exercised once at the end,
-// against a stubbed global fetch (supabase-js resolves it per call), like
-// src/oauth-supabase-store.test.ts.
+// database, no mock.module. The SQLite store is exercised once at the end,
+// against a stubbed global fetch (the database driver resolves it per call), like
+// the src/db tests.
 
 const KEY = "test-usda-key-123";
 const USER_A = "aaaaaaaa-1111-4111-8111-111111111111";

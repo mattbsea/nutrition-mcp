@@ -1,6 +1,6 @@
 /**
  * Saved meals (reusable named meals) and their ingredients. SQLite port of the
- * saved-meal half of src/supabase.ts, including the insert_saved_meal /
+ * saved-meal half of src/db/repo.ts, including the insert_saved_meal /
  * update_saved_meal RPCs as explicit transactions.
  */
 import { decodeEscapeSequences } from "../normalize.js";

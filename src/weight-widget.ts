@@ -1,6 +1,6 @@
 // Widget-only payloads for get_weight_trends: the per-reading weigh-in list
 // and the body-measurement history the weight-trends widget's details view
-// shows. Pure — no Supabase, no mcp.ts — so it unit tests with fixtures.
+// shows. Pure — no database, no mcp.ts — so it unit tests with fixtures.
 //
 // Both ride in the CallToolResult's `_meta` (WEIGHT_ENTRIES_META_KEY and
 // BODY_MEASUREMENTS_META_KEY in src/widgets.ts), never in structuredContent:

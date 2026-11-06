@@ -397,7 +397,7 @@ test("addedSugarMissing: sugar_g given, added_sugar_g not, nothing stored", () =
     expect(addedSugarMissing({ sugar_g: 35 }, 12)).toBe(false);
 });
 
-test("the refusal carries its own analytics category and describes, never directs", () => {
+test("the refusal carries its own error category and describes, never directs", () => {
     const err = addedSugarMissingError("m1");
     expect(err.category).toBe(ADDED_SUGAR_MISSING_CATEGORY);
     expect(ADDED_SUGAR_MISSING_CATEGORY).toBe("added_sugar_missing");

@@ -2,11 +2,9 @@ import { test, expect, describe } from "bun:test";
 import { hashSecret, newOpaqueToken } from "./token-hash.js";
 
 describe("hashSecret", () => {
-    // Must equal Postgres encode(sha256(convert_to('abc','UTF8')),'hex') — the
-    // expression the …_hash_oauth_secrets.sql backfill runs over every row
-    // written before hashing. If the two ever disagree, every backfilled token
-    // stops matching and its owner is logged out.
-    test("matches the sha256 vector the backfill's Postgres expression produces", () => {
+    // The published sha256 test vector. Stored hashes are compared by
+    // recomputing this, so a change would orphan every stored token.
+    test("matches the sha256 test vector", () => {
         expect(hashSecret("abc")).toBe(
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         );

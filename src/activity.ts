@@ -1,8 +1,8 @@
 /**
  * Active calories: energy burned in exercise, logged beside intake (issue #220).
- * Pure — no Supabase, no Hono, never imports mcp.ts. The rows come from
- * `active_calories_log` (supabase/migrations/20261102120000_active_calories.sql)
- * through supabase.ts; this module only decides what they add up to.
+ * Pure — no database, no Hono, never imports mcp.ts. The rows come from
+ * `active_calories_log` (src/db/schema.ts)
+ * through db/repo.ts; this module only decides what they add up to.
  *
  * Two rules are load-bearing:
  *
@@ -205,7 +205,7 @@ export function buildActivityMeta(
 
 /**
  * Derived idempotency key for an activity write, in the same `auto:<sha256>`
- * shape deriveIdempotencyKey (supabase.ts) gives water. The credit percentage
+ * shape deriveIdempotencyKey (db/repo.ts) gives water. The credit percentage
  * is deliberately NOT a part: a retry after the preference changed is still the
  * same burn, and must dedupe rather than insert a second row.
  */

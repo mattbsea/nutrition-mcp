@@ -1,4 +1,4 @@
-// Ported from src/supabase.test.ts: the pure-function blocks (idempotency key
+// Ported from the src/db tests: the pure-function blocks (idempotency key
 // digests, profile derivations, export names, paging helpers, isUuid), pointed
 // at the SQLite layer so its exports are proven to behave like the originals.
 import { test, expect, describe } from "bun:test";
@@ -653,7 +653,7 @@ describe("fetchAllPages", () => {
 // got .range() paging in #66, but the day and range readers did not: they sorted
 // logged_at ASC with no .range(), so past PostgREST's 1000-row cap they kept the
 // OLDEST rows, and a 365-day get_trends showed the latest 30 days as zeros.
-// src/supabase-window.test.ts drives the real paged reader; these pin the
+// the src/db tests drives the real paged reader; these pin the
 // reconcile rule and that every reader still routes through it. ----------
 
 describe("assertWindowComplete", () => {

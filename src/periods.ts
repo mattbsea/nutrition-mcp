@@ -16,7 +16,7 @@ import { isoWeekStart } from "./weight-trend.js";
  * them were on target and how many look incomplete — an average alone hides
  * alternating 1,500 and 2,900 kcal days.
  *
- * Pure: no Supabase, never imports mcp.ts. The handler reads one meal window
+ * Pure: no database, never imports mcp.ts. The handler reads one meal window
  * (`yearSpanStart` .. end date) and the goals history, and builds all four
  * granularities from it.
  */

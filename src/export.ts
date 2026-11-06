@@ -151,9 +151,7 @@ function defuseFormula(value: string): string {
 }
 
 /**
- * csvEscape for text a third party chose — an OAuth client's registered name
- * and redirect, the name and session id an MCP client reports — defused by
- * defuseFormula.
+ * csvEscape for text a third party chose, defused by defuseFormula.
  */
 function csvThirdParty(value: string | null | undefined): string {
     return csvEscape(value == null ? value : defuseFormula(value));

@@ -1,12 +1,8 @@
 /**
- * SQLite persistence layer: the drop-in replacement for src/supabase.ts and the
- * persistence half of src/health-sync-store.ts. Same function names, argument
- * shapes and return shapes; the only owner is OWNER_ID and every query still
- * filters on the `userId` it is given.
- *
- * Exports of src/supabase.ts that are NOT re-implemented (cloud-only: Supabase
- * Auth, OAuth, Patreon, analytics, landing stats) are listed in
- * step-A1-report.md.
+ * SQLite persistence layer. The only owner is OWNER_ID and every query still
+ * filters on the `userId` it is given (there is no row-level security to lean
+ * on). Everything the tools, the export and the Apple Health routes persist
+ * goes through here.
  */
 export { OWNER_ID } from "./owner.js";
 export {

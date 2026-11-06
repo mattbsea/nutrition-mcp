@@ -2,7 +2,7 @@
 // the meal's nutrient totals, scaling, the item-change rules log_saved_meal
 // applies, and the model-facing lines.
 //
-// Pure on purpose: no Supabase, no Hono, no mcp.ts import, so the tools, the
+// Pure on purpose: no database, no Hono, no mcp.ts import, so the tools, the
 // store and the listings all share one set of rules and the rules unit-test
 // without the mock.module window. Every refusal is a ToolError in the
 // "meal_items_invalid" category, except the added-sugar gate, which carries its

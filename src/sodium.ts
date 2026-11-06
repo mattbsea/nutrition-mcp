@@ -4,7 +4,7 @@ import type { Meal } from "./db/repo.js";
 
 /**
  * Sodium: the widget payload under SODIUM_META_KEY (src/widgets.ts), built the
- * way saturated fat's is (saturated-fat.ts). Pure — no Supabase, no Hono, never
+ * way saturated fat's is (saturated-fat.ts). Pure — no database, no Hono, never
  * imports mcp.ts. NULL is "not recorded", never zero.
  *
  * Sodium is milligrams (not salt) and carries a daily ceiling (`goal`). It sits

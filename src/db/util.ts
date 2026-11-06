@@ -3,7 +3,7 @@ import { getDb } from "./conn";
 
 /** A date-time with no zone designator ("2026-11-06T08:00:00", with a "T" or a
  *  space). JavaScript would read it in the PROCESS time zone; the database
- *  reads it as UTC (what Postgres did under Supabase's UTC session). */
+ *  reads it as UTC (what Postgres did under database's UTC session). */
 const NO_OFFSET = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
 
 /** An ISO-8601 UTC instant with milliseconds and a "Z": the one stored form.

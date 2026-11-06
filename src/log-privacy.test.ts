@@ -5,10 +5,10 @@ import ts from "typescript";
 // your account id or email address. Every runtime log line is a console.*
 // call, so this parses every non-test source file and fails if a console.*
 // argument list mentions a user id, an email, a `user=` field or a per-user
-// storage folder name. Per-user questions belong in tool_analytics.
+// storage folder name. Per-user questions belong in the tool log.
 //
 // Parsed with the TypeScript compiler rather than scanned as text: a text
-// window would flag the persistAnalytics({ user_id }) call that follows the
+// window would flag the persistRun({ user_id }) call that follows the
 // log line in runTool, and a hand-rolled paren counter trips on regex
 // literals such as /[)]/.
 
@@ -42,7 +42,7 @@ function consoleArguments(path: string, src: string) {
 
 test("argument extraction survives regex literals and stops at the call", () => {
     const src =
-        'console.log(s.replace(/[)]/g, ""), userId); console.warn(x.split(/"/)); persistAnalytics({ user_id });';
+        'console.log(s.replace(/[)]/g, ""), userId); console.warn(x.split(/"/)); persistRun({ user_id });';
     const calls = consoleArguments("t.ts", src);
     expect(calls.map((c) => c.args)).toEqual([
         's.replace(/[)]/g, ""), userId',
@@ -140,7 +140,7 @@ test("a meal-items refusal thrown through runTool keeps item names off the conso
 // The USDA client logs one [usda] line per call, with the tool, the result and
 // the quota left: never the query text, the FoodData Central id, the API key or
 // the user id. Driven through the real client with an injected fetch and cache
-// and console.log captured; no network and no Supabase.
+// and console.log captured; no network and no database.
 test("the [usda] log lines carry no query, id, key or user id", async () => {
     const { searchUsda, getFoodRecord, createUsdaState } =
         await import("./usda.js");

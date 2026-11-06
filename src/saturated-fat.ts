@@ -4,7 +4,7 @@ import type { Meal } from "./db/repo.js";
 /**
  * Saturated fat: the widget payload under SATURATED_FAT_META_KEY
  * (src/widgets.ts), built the way added-sugar's is (added-sugar.ts). Pure — no
- * Supabase, no Hono, never imports mcp.ts. NULL is "not recorded", never zero.
+ * database, no Hono, never imports mcp.ts. NULL is "not recorded", never zero.
  *
  * Saturated fat is part of fat_g and carries a daily ceiling (`goal`). Trans
  * fat rides in the same payload under `trans` with the same `days`/`meals`

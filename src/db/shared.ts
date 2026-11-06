@@ -47,7 +47,7 @@ export function isUuid(v: string): boolean {
     return UUID_RE.test(v);
 }
 
-/** sha256 over the NUL-joined parts, "auto:"-prefixed (see supabase.ts). */
+/** sha256 over the NUL-joined parts, "auto:"-prefixed (see db/repo.ts). */
 export function deriveIdempotencyKey(
     parts: (string | number | null | undefined)[],
 ): string {

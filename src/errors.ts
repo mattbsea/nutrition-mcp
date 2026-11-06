@@ -2,18 +2,18 @@
 // keeping it dependency-free keeps them that way too. csv.ts and chunk.ts are
 // inlined into widgets via @inlinets and must never import it.
 
-/** An error whose message was written for the caller. withAnalytics returns a
+/** An error whose message was written for the caller. runTool returns a
  * ToolError's message verbatim and replaces every other error's text with a
  * category message plus a ref (policy 5.A). Never wrap third-party text. */
 export class ToolError extends Error {
     override name = "ToolError";
-    /** tool_analytics.error_category for this refusal, when it should be
+    /** the error category for this refusal, when it should be
      * counted on its own rather than bucketed by categorizeError's wording
-     * heuristics (src/analytics.ts). */
+     * heuristics (src/tool-runner.ts). */
     readonly category?: ToolErrorCategory;
     /** Text for the runtime log in place of the message, for messages that
      * quote the user's own text (an item or saved-meal name): the caller sees
-     * the message, the `[analytics]` log line gets this. The runtime log never
+     * the message, the `[tool]` log line gets this. The runtime log never
      * carries names, meal or item text (src/log-privacy.test.ts). */
     readonly logText?: string;
 
@@ -50,7 +50,7 @@ export function errorLogText(error: unknown): string {
 }
 
 /** Categories a ToolError may name explicitly. A closed list so a typo cannot
- * open a new tool_analytics bucket nobody queries. */
+ * open a new error bucket nobody queries. */
 export type ToolErrorCategory =
     // log_meal / update_meal given sugar_g without added_sugar_g while the
     // ADDED_SUGAR_REQUIRED_FROM gate is on (src/added-sugar.ts).
@@ -75,7 +75,7 @@ export function newErrorRef(): string {
 export type UpstreamErrorCategory = "usda_unavailable";
 
 /** A failure of an upstream service (src/usda.ts), not of the request. Its
- * message is fixed text for the runtime log only: withAnalytics replaces it
+ * message is fixed text for the runtime log only: runTool replaces it
  * for the model with the category's temporary message and a ref
  * (userFacingError), so no upstream text or URL can reach the caller. */
 export class UpstreamError extends Error {

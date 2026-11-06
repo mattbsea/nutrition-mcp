@@ -1,14 +1,11 @@
-// The at-rest form of every OAuth secret this server issues — access tokens,
-// refresh tokens, authorization codes and client secrets — and how new ones
-// are minted. Deliberately free of any Supabase import, so src/oauth.test.ts's
-// fake store can apply the exact same contract the real one does.
+// The at-rest form of every secret this server issues — the Apple Health
+// shortcut link tokens and the claim/connect secrets around them — and how new
+// ones are minted. Deliberately free of any database import, so a test double
+// can apply the exact same contract the real store does.
 import crypto from "node:crypto";
 
-// Lowercase sha256 hex of the UTF-8 bytes. Must agree byte for byte with the
-// Postgres expression the backfill migration (…_hash_oauth_secrets.sql) runs
-// over rows written before hashing: encode(sha256(convert_to(x,'UTF8')),'hex').
-// If the two ever disagree, every backfilled token stops matching and its
-// owner is logged out.
+// Lowercase sha256 hex of the UTF-8 bytes. Stored hashes are compared by
+// recomputing this, so the function must never change.
 export function hashSecret(raw: string): string {
     return crypto.createHash("sha256").update(raw, "utf8").digest("hex");
 }

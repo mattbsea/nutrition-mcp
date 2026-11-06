@@ -3,8 +3,8 @@ import { dateInTz } from "./tz.js";
 /**
  * Goals history: one row per change to a user's nutrition goals, so a past
  * period can be compared with the goal that was in effect at the time rather
- * than today's. Pure — no Supabase; `getNutritionGoalsHistory` in
- * `supabase.ts` reads the rows (merged with the current goals row by
+ * than today's. Pure — no database; `getNutritionGoalsHistory` in
+ * `db/repo.ts` reads the rows (merged with the current goals row by
  * `withCurrentGoals`) and `upsertNutritionGoals` writes them.
  */
 
@@ -99,7 +99,7 @@ export function sameGoals(a: GoalValues, b: GoalValues): boolean {
  * Why: the table is created and seeded by its migration before the code that
  * writes it is deployed, so a goal saved by the old code in between (a first
  * goal, or a change) is in `nutrition_goals` but not here until the user's
- * next save backfills it (`recordGoalsHistory`, src/supabase.ts). Without this
+ * next save backfills it (`recordGoalsHistory`, src/db/repo.ts). Without this
  * merge, reads in the meantime would show no targets, or the stale ones.
  *
  * The rule mirrors `recordGoalsHistory`'s backfill exactly, so a read shows

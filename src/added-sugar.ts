@@ -4,7 +4,7 @@ import { ToolError, type ToolErrorCategory } from "./errors.js";
 
 /**
  * Added sugar: the shared rules every write path and every widget payload use.
- * Pure — no Supabase, no Hono, never imports mcp.ts — so the importer, the
+ * Pure — no database, no Hono, never imports mcp.ts — so the importer, the
  * tools and the widget harness all build from the same code.
  *
  * Definition (the US label one): sugars added during processing or
@@ -48,7 +48,7 @@ export function addedSugarError(
  */
 export const ADDED_SUGAR_REQUIRED_FROM_ENV = "ADDED_SUGAR_REQUIRED_FROM";
 
-/** tool_analytics.error_category of the refusal. */
+/** the error category of the refusal. */
 export const ADDED_SUGAR_MISSING_CATEGORY: ToolErrorCategory =
     "added_sugar_missing";
 
@@ -119,7 +119,7 @@ export function addedSugarMissingText(mealId?: string): string {
         : `Not saved, meal ${mealId} is unchanged: added_sugar_g is required whenever sugar_g is given and the meal has no added sugar recorded. ${ADDED_SUGAR_DEFINITION}`;
 }
 
-/** The refusal as a ToolError carrying its own analytics category. */
+/** The refusal as a ToolError carrying its own error category. */
 export function addedSugarMissingError(mealId?: string): ToolError {
     return new ToolError(addedSugarMissingText(mealId), {
         category: ADDED_SUGAR_MISSING_CATEGORY,

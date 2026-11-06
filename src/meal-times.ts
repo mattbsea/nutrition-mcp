@@ -3,7 +3,7 @@ import { formatLocalDateTime } from "./tz.js";
 
 /**
  * Meal clock times for the widgets: the payload under MEAL_TIMES_META_KEY
- * (src/widgets.ts). Pure — no Supabase, no Hono, never imports mcp.ts.
+ * (src/widgets.ts). Pure — no database, no Hono, never imports mcp.ts.
  *
  * The breakdown rows (MEAL_BREAKDOWN_ITEM in src/mcp.ts) carry a day at most,
  * never a time, and their schema is frozen, so the widgets' "08:10 · Breakfast"

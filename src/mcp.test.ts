@@ -892,7 +892,7 @@ describe("caffeine never reaches an energy figure", () => {
 });
 
 // The insights module renders an alcohol line purely from the data, because it
-// stays free of Supabase and so cannot see the per-user opt-in. gateAlcohol is
+// stays free of database access and so cannot see the per-user opt-in. gateAlcohol is
 // where that flag reaches it, so these assert the end result rather than the
 // zeroing: no alcohol wording in either narrative when tracking is off.
 describe("gateAlcohol", () => {
@@ -1593,7 +1593,7 @@ describe("trendsDayPayloadOf", () => {
 // their handler — read or write one profile column, then pick a sentence — and
 // a mutation audit found that inverting either tool's enabled state failed
 // nothing. So the tools below are registered on a real McpServer and driven
-// through a real client over an in-memory transport, with only ./supabase.js
+// through a real client over an in-memory transport, with only ./db/repo.js
 // stubbed. That also puts the input schemas under test end-to-end, which is the
 // only way to prove a bad argument is rejected BEFORE the handler runs.
 //
@@ -1752,7 +1752,7 @@ const db = {
     // write whose key matched an existing row.
     dedupe: false,
     // get_profile's Apple Health sync status, as the health-sync store reads
-    // it through getSupabase(): the link row, and the latest acked date.
+    // it through the repo: the link row, and the latest acked date.
     healthSyncLink: null as Record<string, unknown> | null,
     healthSyncSentThrough: null as string | null,
     // update_meal's reads of a stored meal's sugar pair: 0 when both sugar
@@ -1833,7 +1833,7 @@ mock.module("./db/repo.js", () => ({
     // hand back whatever the test staged: the fixtures below already sit inside
     // the window they ask for, and filtering here would only re-implement the
     // query under test. Paging, ordering and the count reconcile belong to the
-    // real reader, driven against a stubbed fetch in supabase-window.test.ts.
+    // real reader, driven against a stubbed fetch in database-window.test.ts.
     getMealsInRange: async (_userId: string, s: string, e: string) => {
         db.mealRangeArgs.push([s, e]);
         if (db.failWith) throw db.failWith;
@@ -2934,7 +2934,7 @@ describe("log_meal and update_meal round-trip caffeine_mg", () => {
     });
 
     // The digest is frozen (CONTRACT, and the "DO NOT ADD" comments in
-    // src/supabase.ts and src/import.ts). Adding caffeine_mg to it would orphan
+    // src/db/repo.ts and src/import.ts). Adding caffeine_mg to it would orphan
     // every `auto:` key already stored, so the same meal logged with and
     // without a caffeine figure must still derive one key — and that key must
     // still be the literal value the pre-caffeine code produced.
@@ -3047,7 +3047,7 @@ describe("bulk_import_meals carries caffeine_mg through the row schema", () => {
 
     // Bounds live in validateRow, not in Zod: a schema-level rejection happens
     // before the handler runs and discards the structured report, the warnings
-    // and the analytics row — for what will be the caller's most common
+    // and the tool run — for what will be the caller's most common
     // mistake (a grams column mapped straight across).
     test("an out-of-range figure is a per-row error, not a lost batch", async () => {
         await withTools(null, async (c) => {
@@ -4435,7 +4435,7 @@ describe("id params are validated before the database", () => {
 
 // ---------- raw errors are sanitized at the exit ----------
 //
-// withAnalytics hands the model a ToolError's text verbatim and replaces every
+// runTool hands the model a ToolError's text verbatim and replaces every
 // other error with a category message plus a ref, so Postgres/PostgREST text
 // (table names, casts, constraint names) never reaches the conversation.
 describe("raw database errors never reach the model", () => {
@@ -4506,7 +4506,7 @@ describe("raw database errors never reach the model", () => {
         expect(db.goals?.daily_calories).toBe(1800);
     });
 
-    // Resources bypass withAnalytics, and the SDK forwards a thrown message to
+    // Resources bypass runTool, and the SDK forwards a thrown message to
     // the client verbatim, so the weekly summary carries its own catch.
     test("the weekly-summary resource hides the raw text behind a ref", async () => {
         db.failWith = new Error(
@@ -4543,8 +4543,8 @@ describe("raw database errors never reach the model", () => {
 // get_meals_by_date_range returns every meal as full text, so an unbounded
 // range dumped the whole diary into one response; get_nutrition_summary has
 // the same guard at a quarter. The readers page, so the caps are about
-// response size, not truncation. The guard runs inside withAnalytics, so each
-// rejection is an isError result with an analytics row, not a schema-level
+// response size, not truncation. The guard runs inside runTool, so each
+// rejection is an isError result with an tool run, not a schema-level
 // refusal.
 describe("date-range listings reject bad and oversized ranges", () => {
     const rowsFor = (tool: string) =>
@@ -4762,7 +4762,7 @@ describe("meal listings are compact by default", () => {
     // Pinned form: the v2 SDK answers an input-schema violation with an
     // isError tool result naming the field (the same form the write-tool
     // bounds above get), not a rejected callTool promise. The handler never
-    // runs, so no analytics row is written.
+    // runs, so no tool run is written.
     test("get_meals_by_date rejects an unknown detail at the schema", async () => {
         db.meals = [meal()];
         await withTools(null, async (call) => {
@@ -4794,7 +4794,7 @@ describe("meal listings are compact by default", () => {
         });
     });
 
-    test("detail is not sent to analytics", async () => {
+    test("detail is not logged", async () => {
         db.meals = [meal()];
         await withTools(null, async (call) => {
             await call("get_meals_by_date", {
@@ -5681,7 +5681,7 @@ describe("manual write tools resolve logged_at in the profile timezone", () => {
 
     // log_meal, update_meal and log_water validated logged_at not at all, so
     // junk was handed to Postgres and came back as a raw cast error (or, worse,
-    // parsed into something plausible). The handler throws, and withAnalytics
+    // parsed into something plausible). The handler throws, and runTool
     // turns that into an isError result rather than rejecting the call.
     test("log_meal rejects a logged_at it cannot place on the timeline", async () => {
         await withTools(null, async (call) => {
@@ -6000,7 +6000,7 @@ describe("manual write tools resolve logged_at in the profile timezone", () => {
 // never the weight unit), the per-site plausibility check, the kind filter and
 // default window of the read, display in the preferred unit, and the update
 // path that re-reads a stored number in a corrected unit. The SQL side is in
-// supabase.test.ts / supabase-window.test.ts.
+// the src/db tests.
 describe("body measurements", () => {
     const rowsFor = (tool: string) =>
         db.toolRuns.filter((r) => r.tool_name === tool);
@@ -6854,7 +6854,7 @@ describe("every tool carries directory-ready annotations", () => {
 // ---------- /mcp over HTTP: both protocol eras ----------
 //
 // Kept in this file rather than its own: mock.module is process-wide, and a
-// separate file with its own mock/restore of ./supabase.js broke
+// separate file with its own mock/restore of ./db/repo.js broke
 // middleware.test.ts's mock on Linux CI even with a snapshot-based restore.
 // Sharing this file's single mock window is what proved green; see the
 // restore note on the afterAll above for the mechanism.
@@ -6979,7 +6979,7 @@ describe("/mcp serves the 2026-07-28 revision", () => {
 
     // server/discover is the first request every negotiating client sends and
     // its response — supportedVersions, capabilities, instructions — contains
-    // nothing a tool registration produces. Paying a Supabase round-trip for it
+    // nothing a tool registration produces. Paying a database round-trip for it
     // made the probe the request that failed first under rate pressure.
     test("server/discover costs no profile read and still answers in full", async () => {
         const r = await rpc(
@@ -7727,9 +7727,8 @@ describe("/mcp transport posture", () => {
     });
 
     // With no forwarding headers the icon falls back to the request's own
-    // origin — the same fallback getBaseUrl gives the OAuth metadata URLs. It
-    // used to be a hardcoded "http://localhost", so one request could advertise
-    // an icon on one host and its resource metadata on another.
+    // origin — the same fallback getBaseUrl gives every other caller. It
+    // used to be a hardcoded "http://localhost".
     test("with no forwarding headers the icon URL is the request origin", async () => {
         await withHttpClient("u1", { pin: "2026-07-28" }, async (client) => {
             expect(client.getServerVersion()?.icons?.[0]?.src).toBe(
@@ -12201,7 +12200,7 @@ function usdaDepsFor(
     };
 }
 
-const lastAnalytics = () => db.toolRuns.at(-1)!;
+const lastToolRun = () => db.toolRuns.at(-1)!;
 
 describe("USDA tools: listing and annotations", () => {
     test("both tools are read-only, open-world and carry a title", async () => {
@@ -12265,7 +12264,7 @@ describe("USDA tools: search_foods", () => {
             dataType: ["Foundation", "SR Legacy", "Survey (FNDDS)"],
             pageSize: 10,
         });
-        expect(lastAnalytics()).toMatchObject({
+        expect(lastToolRun()).toMatchObject({
             tool_name: "search_foods",
             success: true,
         });
@@ -12341,7 +12340,7 @@ describe("USDA tools: get_food_macros", () => {
         );
         expect(fake.calls[0]!.url).not.toContain(USDA_KEY);
         expect(fake.calls[0]!.headers["X-Api-Key"]).toBe(USDA_KEY);
-        expect(lastAnalytics()).toMatchObject({
+        expect(lastToolRun()).toMatchObject({
             tool_name: "get_food_macros",
             success: true,
         });
@@ -12424,7 +12423,7 @@ describe("USDA tools: unavailable paths", () => {
         expect(fake.calls).toHaveLength(0);
     });
 
-    test("a 403 is a normal unavailable result, logged as an analytics failure", async () => {
+    test("a 403 is a normal unavailable result, logged as an tool failure", async () => {
         const fake = fakeUsda(() =>
             usdaReply({ error: { code: "API_KEY_INVALID" } }, 403),
         );
@@ -12433,7 +12432,7 @@ describe("USDA tools: unavailable paths", () => {
             expect(r.isError).toBeFalsy();
             expect(textOf(r)).toBe("USDA data is unavailable right now.");
         });
-        expect(lastAnalytics()).toMatchObject({
+        expect(lastToolRun()).toMatchObject({
             tool_name: "get_food_macros",
             success: false,
             error_category: "usda_unavailable",
@@ -12453,7 +12452,7 @@ describe("USDA tools: unavailable paths", () => {
             expect(text).not.toContain(USDA_KEY);
         });
         expect(fake.calls).toHaveLength(2);
-        expect(lastAnalytics()).toMatchObject({
+        expect(lastToolRun()).toMatchObject({
             tool_name: "get_food_macros",
             success: false,
             error_category: "usda_unavailable",

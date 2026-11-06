@@ -914,7 +914,7 @@ function summaryDay(name: string) {
 }
 
 // topMealBreakdown's rule (src/mcp.ts, not importable here: it pulls in
-// Supabase): the order-preserving union of each metric's top N rows with a
+// database): the order-preserving union of each metric's top N rows with a
 // value above 0, ties to the earlier row.
 function topRows(rows: ReturnType<typeof breakdown>): number[] {
     const keys = [

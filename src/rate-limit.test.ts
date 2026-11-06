@@ -1,7 +1,6 @@
 import { test, expect, beforeEach, afterEach, setSystemTime } from "bun:test";
 import {
     checkRateLimit,
-    checkAuthRateLimit,
     noteAuthFailure,
     clearAuthFailures,
     getBanState,
@@ -223,28 +222,14 @@ test("checkRateLimit allows 60 requests per user per minute, then blocks", () =>
     expect(checkRateLimit(user).allowed).toBe(true);
 });
 
-test("checkAuthRateLimit allows 30 requests per IP per minute, then blocks", () => {
-    const ip = "203.0.113.40";
-    for (let i = 0; i < 30; i++) {
-        const result = checkAuthRateLimit(ip);
-        expect(result.allowed).toBe(true);
-        expect(result.limit).toBe(30);
-    }
-    expect(checkAuthRateLimit(ip).allowed).toBe(false);
-
-    // Independent per IP, and independent of the per-user store.
-    expect(checkAuthRateLimit("203.0.113.41").allowed).toBe(true);
-    expect(checkRateLimit(ip).allowed).toBe(true);
-});
-
 test("_resetBuckets clears rate-limit windows and ban state together", () => {
     const ip = "203.0.113.50";
-    for (let i = 0; i < 30; i++) checkAuthRateLimit(ip);
-    expect(checkAuthRateLimit(ip).allowed).toBe(false);
+    for (let i = 0; i < 60; i++) checkRateLimit(ip);
+    expect(checkRateLimit(ip).allowed).toBe(false);
     expect(fail(ip, 20).banned).toBe(true);
 
     _resetBuckets();
 
-    expect(checkAuthRateLimit(ip).allowed).toBe(true);
+    expect(checkRateLimit(ip).allowed).toBe(true);
     expect(getBanState(ip).banned).toBe(false);
 });

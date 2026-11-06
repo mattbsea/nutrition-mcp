@@ -4,7 +4,7 @@
 // and weight, the day's meals or the period's logging habits, a few
 // highlights, and (today only) what remains of the day's goals.
 //
-// Pure: no Supabase, no Hono, never imports mcp.ts. The handler reads one
+// Pure: no database, no Hono, never imports mcp.ts. The handler reads one
 // 61-day window of meals, water and weigh-ins and hands it here with the
 // goals, the profile's units and the clock, so every rule below is unit-tested
 // against fixtures (src/digest.test.ts).

@@ -7,7 +7,7 @@
 //   POST /api/v1/health-sync/activity  the opt-in activity shortcut sends
 //                                      its Active Energy day totals
 //
-// STEP A2 STATE: the OAuth pairing flow (start/connect/callback/claim) is gone
+// STEP A2 STATE: the browser pairing flow (start/connect/callback/claim) is gone
 // and this router is NOT MOUNTED; src/index.ts answers every health-sync path
 // with a 501 {ok:false,error:"not_available_yet"} until step B swaps the link
 // token auth below for the configured shortcut_key and mounts it. The handlers
@@ -66,12 +66,9 @@ import {
 import { newErrorRef } from "./errors.js";
 import { getClientIp, recordAuthFailure } from "./perimeter.js";
 import {
-    checkAuthRateLimit,
     checkHealthSyncRateLimit,
-    checkHealthSyncStartGlobalLimit,
     clearAuthFailures,
     getBanState,
-    noteHealthSyncClaimFailure,
     type RateLimitResult,
 } from "./rate-limit.js";
 const API = "/api/v1/health-sync";
@@ -182,7 +179,7 @@ interface CallNote {
     entries?: number;
     notices?: number;
     /** Set for server_error / unavailable: the ref the caller was shown, and
-     *  the raw error text, JSON-escaped and capped like analyticsLogLine. */
+     *  the raw error text, JSON-escaped and capped like toolLogLine. */
     ref?: string;
     error?: string;
     /** A process-wide signal worth an operator's eye (no per-user data). */
@@ -443,7 +440,7 @@ export function createHealthSyncRouter(deps: HealthSyncRouterDeps = {}) {
     // Link-token auth. Three outcomes, like authenticateBearer: unavailable
     // (we could not check) is a 503 with no strike, so a database outage
     // never bans a phone; invalid is a 401 and a strike. Anything without the
-    // nmhs_ shape — an OAuth access token included — is refused without a
+    // nmhs_ shape is refused without a
     // database call, and still strikes. `kinds` lists the links a route
     // accepts, looked up in that order: the Apple Health link for /pending
     // and /ack, the activity link for /activity, either for /revoke.

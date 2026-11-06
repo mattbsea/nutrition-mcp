@@ -2,14 +2,14 @@
 // precedence between sources, the merge and derivation rules the write paths
 // apply, parsing of stored maps, and the model-facing and widget-facing shapes.
 //
-// Pure on purpose: no Supabase, no Hono, no mcp.ts import. The one runtime
-// dependency is ToolError. The cache reads live in src/supabase.ts, and this
+// Pure on purpose: no database, no Hono, no mcp.ts import. The one runtime
+// dependency is ToolError. The cache reads live in src/db/repo.ts, and this
 // module only receives the records they return. The server decides every label:
 // a model's claim (food_ref) is checked against the stored record, and a value
 // that does not match within tolerance is labelled "estimate", never the
 // claimed source.
 //
-// Storage shape (supabase/migrations/20261010160000_nutrient_sources.sql):
+// Storage shape (src/db/schema.ts):
 //   nutrient_sources  { [nutrient]: { s, ref? } | { s: "mixed", parts } }
 //   source_detail     { "usda:<id>" | "openfoodfacts:<barcode>": { name, ... } }
 // Only nutrients that have a value get an entry. NULL means no provenance was
@@ -1071,7 +1071,7 @@ const COMPACT_SOURCE: Record<NutrientSource, string> = {
  * line per item that carries a record-backed or user-stated label, under an
  * "Ingredient sources:" heading. Null when no item qualifies, so the caller adds
  * nothing. The item name is the caller's own text, so it is only echoed here and
- * never logged (the runtime log carries the analytics line alone).
+ * never logged (the runtime log carries the tool log line alone).
  *
  * Example: "- chicken breast: USDA 171477 (150 g) for calories, protein, carbs,
  * fat; fiber, sugar estimated"

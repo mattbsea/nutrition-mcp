@@ -500,13 +500,13 @@ describe("link-token auth", () => {
         expect(b.message).toContain("Nutrition MCP Health");
     });
 
-    test("an OAuth access token is refused here without a lookup", async () => {
+    test("a token without the nmhs_ shape is refused without a lookup", async () => {
         const ctx = setup();
         seedLink(ctx);
-        // The shape newOpaqueToken() mints for /token.
-        const oauthToken = "Q".repeat(43);
+        // The shape newOpaqueToken() mints.
+        const stray = "Q".repeat(43);
         const r = await ctx.req("/api/v1/health-sync/pending", {
-            token: oauthToken,
+            token: stray,
         });
         expect(r.status).toBe(401);
         expect(ctx.calls).not.toContain("lookupLink");

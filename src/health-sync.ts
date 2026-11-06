@@ -1,7 +1,7 @@
 // Apple Health sync via an iOS Shortcut: the pure half. Everything here is a
 // function of its arguments (plus the tz helpers, which only read the ICU
 // database), so the rules that decide what reaches Apple Health are pinned by
-// table-driven tests in src/health-sync.test.ts without Supabase or Hono.
+// table-driven tests in src/health-sync.test.ts without a database or Hono.
 //
 // The shape of the feature, in one paragraph: the Shortcut asks GET /pending
 // for the daily totals of days that are over ("closed" at 05:00 local the next
@@ -11,7 +11,7 @@
 // that shrinks gets a notice instead — Health can only add samples, never lower
 // one it already holds.
 //
-// Must not import mcp.ts or supabase.ts at runtime (types only), and must not
+// Must not import mcp.ts or db/repo.ts at runtime (types only), and must not
 // reuse the zero-filling `sumMeals` / `totalsPayloadOf`: here a nutrient no
 // meal carries is null and is never sent, while a real 0 is a value.
 
@@ -79,10 +79,8 @@ export function shortcutUrlFromEnv(raw: string | undefined): string | null {
 export const HEALTH_SYNC_SHORTCUT_URL: string | null = shortcutUrlFromEnv(
     process.env.HEALTH_SYNC_SHORTCUT_URL,
 );
-/** The built-in first-party OAuth client the connect flow signs in through. */
-export const HEALTH_SYNC_CLIENT_ID = "nutrition-mcp-health-sync";
-/** Every link token starts with this, so a stray OAuth token is told apart
- *  without a database call. */
+/** Every link token starts with this, so a stray token of another shape is
+ *  told apart without a database call. */
 export const HEALTH_SYNC_TOKEN_PREFIX = "nmhs_";
 /** One sync run holds the per-user lease this long. */
 export const HEALTH_SYNC_LEASE_SECONDS = 120;

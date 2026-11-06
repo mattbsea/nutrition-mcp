@@ -329,7 +329,7 @@ function nonEmpty(b: DailyBucket): boolean {
  *
  * Note this is data-driven only. For alcohol it pairs with the per-user
  * alcohol_tracking_enabled flag, which lives in mcp.ts since this module stays
- * free of Supabase. Caffeine deliberately has NO such flag — the opt-in exists
+ * free of database access. Caffeine deliberately has NO such flag — the opt-in exists
  * for a specific harm (surfacing trace alcohol to a user in recovery) that has
  * no caffeine equivalent — so for caffeine this check is the whole gate. */
 function hasAnyPositive(values: number[]): boolean {

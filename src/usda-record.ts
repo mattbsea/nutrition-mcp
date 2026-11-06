@@ -1,5 +1,5 @@
 // The USDA FoodData Central record as the food cache stores it. Pure: no
-// Supabase, no HTTP, no mcp.ts import, so src/provenance.ts can verify a logged
+// database, no HTTP, no mcp.ts import, so src/provenance.ts can verify a logged
 // value against it and the USDA client (a later part) can fill it.
 //
 // src/usda.ts writes a row of this shape (normalizeDetail, then the cache

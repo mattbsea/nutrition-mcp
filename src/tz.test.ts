@@ -354,7 +354,7 @@ test("validateTz accepts IANA names and rejects junk", () => {
     expect(validateTz("")).toBe(false);
 });
 
-// withAnalytics passes a ToolError's message through verbatim and sanitizes
+// runTool passes a ToolError's message through verbatim and sanitizes
 // everything else, so the logged_at explanations (and the set_timezone hint
 // built on them) only reach the model because LoggedAtError is a ToolError.
 // Its own name must survive the subclassing: ToolError declares `name` as a

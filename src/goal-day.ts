@@ -5,7 +5,7 @@ import { localClock } from "./meal-times.js";
 /**
  * The goal-progress widget's day detail, under GOAL_DAY_META_KEY
  * (src/widgets.ts) in get_goal_progress's `_meta`: what the frozen
- * structuredContent cannot carry. Pure — no Supabase, no Hono, never imports
+ * structuredContent cannot carry. Pure — no database, no Hono, never imports
  * mcp.ts.
  *
  * - `now`: the account's local clock (HH:MM) when the request was answered,

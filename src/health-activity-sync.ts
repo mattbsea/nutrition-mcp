@@ -2,9 +2,9 @@
  * Apple Health activity sync: the pure rules for POST
  * /api/v1/health-sync/activity, which the opt-in "Nutrition MCP Activity"
  * shortcut calls with its Active Energy total for today and the days before.
- * No Supabase, no Hono, never imports mcp.ts. The HTTP half is in
+ * No database, no Hono, never imports mcp.ts. The HTTP half is in
  * src/health-sync-routes.ts, the table in
- * supabase/migrations/20261103120000_health_activity_sync.sql.
+ * src/db/schema.ts.
  *
  * The rules that matter:
  *

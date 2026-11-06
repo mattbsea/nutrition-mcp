@@ -1,6 +1,6 @@
 /**
  * Logged meals and their ingredient rows. SQLite port of the meal half of
- * src/supabase.ts, including the insert_meal_with_items / update_meal_with_items
+ * src/db/repo.ts, including the insert_meal_with_items / update_meal_with_items
  * RPCs (now explicit transactions). Every statement carries `user_id = ?`.
  */
 import { zonedDayStartUtc, zonedNextDayStartUtc } from "../tz.js";
@@ -45,7 +45,7 @@ import type {
 /**
  * The server-derived idempotency key for a meal write, over the resolved
  * logged_at. DO NOT ADD FIELDS TO THE DIGEST (see the warning in
- * src/supabase.ts mealIdempotencyKey, which this mirrors byte for byte):
+ * src/db/repo.ts mealIdempotencyKey, which this mirrors byte for byte):
  * appending one changes every derived key and turns a clean no-op re-log into
  * a duplicate row.
  */
