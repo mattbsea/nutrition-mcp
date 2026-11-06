@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createApp, setShuttingDownForTest } from "./index.js";
+import { sanitizedMcpRequest } from "./mcp.js";
 import {
     installLogRedaction,
     keysMatch,
@@ -547,6 +548,72 @@ describe("the key never reaches a log or a response", () => {
         const joined = seen.join("\n");
         expect(joined).not.toContain(KEY);
         expect(joined).toContain("[redacted]");
+    });
+
+    test("installLogRedaction also scrubs objects, arrays, Maps and the Error cause chain", () => {
+        const seen: unknown[][] = [];
+        const orig = { log: console.log, error: console.error };
+        console.log = (...a: unknown[]) => void seen.push(a);
+        console.error = (...a: unknown[]) => void seen.push(a);
+        const uninstall = installLogRedaction(() => [KEY]);
+        try {
+            console.log({ url: `https://x/mcp/${KEY}`, nested: { k: KEY } });
+            console.log([`/mcp/${KEY}`, 1]);
+            console.log(new Map([["u", `/mcp/${KEY}`]]));
+            console.log({ fine: "no secret here", n: 1 });
+            console.error(
+                new Error("outer", {
+                    cause: new Error(`inner for /mcp/${KEY}`),
+                }),
+            );
+        } finally {
+            uninstall();
+            console.log = orig.log;
+            console.error = orig.error;
+        }
+        const text = (x: unknown): string =>
+            x instanceof Error
+                ? `${x.message} ${x.stack} ${text((x as { cause?: unknown }).cause)}`
+                : typeof x === "string"
+                  ? x
+                  : JSON.stringify(x);
+        for (const call of seen.slice(0, 3)) {
+            expect(call.map(text).join(" ")).not.toContain(KEY);
+        }
+        // A clean object is passed through untouched (same reference).
+        expect(typeof seen[3]![0]).toBe("object");
+        expect(seen[3]![0]).toEqual({ fine: "no secret here", n: 1 });
+        const err = seen[4]![0] as Error;
+        expect(err).toBeInstanceOf(Error);
+        expect(err.message).toBe("outer");
+        expect(text(err)).not.toContain(KEY);
+        expect((err.cause as Error).message).toContain("[redacted]");
+    });
+
+    test("sanitizedMcpRequest drops the key from the URL and keeps method, headers and body", async () => {
+        const raw = new Request(`http://x:8080/mcp/${KEY}?a=1`, {
+            method: "POST",
+            headers: { "content-type": "application/json", "x-test": "yes" },
+            body: '{"hello":"world"}',
+        });
+        const clean = sanitizedMcpRequest(raw);
+        expect(new URL(clean.url).pathname).toBe("/mcp");
+        expect(clean.url).not.toContain(KEY);
+        expect(clean.method).toBe("POST");
+        expect(clean.headers.get("x-test")).toBe("yes");
+        expect(await clean.json()).toEqual({ hello: "world" });
+    });
+
+    test("the SDK never sees the key: a real MCP call works and nothing logged contains it", async () => {
+        const cap = capture();
+        let r: Response;
+        try {
+            r = await mcpPost(KEY);
+        } finally {
+            cap.restore();
+        }
+        expect(r.status).toBeLessThan(500);
+        expect(cap.lines.join("\n")).not.toContain(KEY);
     });
 
     test("an unhandled error returns a generic 500 and logs without the URL", async () => {

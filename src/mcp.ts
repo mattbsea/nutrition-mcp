@@ -9056,6 +9056,15 @@ const mcpHandler = createMcpHandler(
 // wedged in a "connected but no tools" state. Refusing the stream (spec-allowed: a server
 // MAY return 405 when it offers no SSE stream at this endpoint) means the client
 // holds nothing that a deploy can break, so updates become truly invisible.
+/**
+ * The request as the SDK sees it: same method, headers and body, URL with the
+ * secret path key replaced by the bare `/mcp`. Exported so a test can pin that
+ * the key is gone.
+ */
+export function sanitizedMcpRequest(raw: Request): Request {
+    return new Request(new URL("/mcp", raw.url).href, raw);
+}
+
 export const handleMcp = async (c: Context) => {
     if (c.req.method !== "POST") {
         return c.json(
@@ -9079,11 +9088,11 @@ export const handleMcp = async (c: Context) => {
         );
     }
 
-    // The handler never derives auth from headers or the URL: the path key was
-    // verified by the perimeter middleware before this ran, and nothing about
-    // it (the URL included) is forwarded into the SDK's context, so no handler
-    // or error path can echo it.
-    return mcpHandler.fetch(c.req.raw);
+    // The path key was verified by the perimeter middleware before this ran.
+    // The SDK is handed a request rewritten to the bare /mcp path, so the key
+    // never reaches its context (requestInfo.url), its error messages or any
+    // log line it writes. The request body and headers are carried over.
+    return mcpHandler.fetch(sanitizedMcpRequest(c.req.raw));
 };
 
 // Aborts any in-flight 2026-era exchanges on shutdown. The legacy leg holds

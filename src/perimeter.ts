@@ -19,6 +19,7 @@
  *  - X-Forwarded-For is trusted only when TRUST_PROXY=1.
  */
 import { timingSafeEqual } from "node:crypto";
+import { inspect } from "node:util";
 import type { Context, MiddlewareHandler } from "hono";
 import {
     checkRateLimit,
@@ -161,13 +162,28 @@ export function installLogRedaction(
 ): () => void {
     const methods = ["log", "info", "warn", "error", "debug"] as const;
     const originals = methods.map((m) => console[m]);
-    const scrub = (arg: unknown): unknown => {
+    const scrub = (arg: unknown, depth = 0): unknown => {
         if (typeof arg === "string") return redactText(arg, secrets());
         if (arg instanceof Error) {
             const copy = new Error(redactText(arg.message, secrets()));
             copy.name = arg.name;
             if (arg.stack) copy.stack = redactText(arg.stack, secrets());
+            // The cause chain is where wrapped fetch/SDK errors keep the URL.
+            if ("cause" in arg && depth < 8) {
+                (copy as { cause?: unknown }).cause = scrub(
+                    arg.cause,
+                    depth + 1,
+                );
+            }
             return copy;
+        }
+        if (arg !== null && typeof arg === "object") {
+            // Plain objects, arrays, Maps, class instances: render the way
+            // console would, and only substitute when a secret is in there, so
+            // clean objects keep their normal (inspectable) form.
+            const rendered = inspect(arg, { depth: 8, breakLength: Infinity });
+            const clean = redactText(rendered, secrets());
+            return clean === rendered ? arg : clean;
         }
         return arg;
     };
