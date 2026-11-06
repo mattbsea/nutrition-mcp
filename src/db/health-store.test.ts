@@ -5,8 +5,6 @@ import {
     HEALTH_SYNC_LINK_MAX_AGE_MS,
     createSqliteHealthActivityLinkStore,
     createSqliteHealthSyncStore,
-    createSupabaseHealthActivityLinkStore,
-    createSupabaseHealthSyncStore,
     sqliteHealthSyncCleanupStore,
     type HealthSyncDayRow,
 } from "./repo.js";
@@ -43,13 +41,6 @@ const dayRow = (
     first_sent_at: null,
     last_sent_at: null,
     ...over,
-});
-
-test("the Supabase-named factories are aliases of the SQLite ones (until A2 renames call sites)", () => {
-    expect(createSupabaseHealthSyncStore).toBe(createSqliteHealthSyncStore);
-    expect(createSupabaseHealthActivityLinkStore).toBe(
-        createSqliteHealthActivityLinkStore,
-    );
 });
 
 describe("pending connects and claims", () => {

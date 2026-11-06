@@ -265,6 +265,26 @@ export function toolLogLine(
     }
 }
 
+/** What an observer is told about each finished tool call. */
+export interface ToolRun {
+    tool: string;
+    success: boolean;
+    /** Set when `success` is false. */
+    category?: string;
+    durationMs: number;
+}
+
+let observer: ((run: ToolRun) => void) | null = null;
+
+/**
+ * Test seam: receives one record per finished call (the same facts the
+ * `[tool]` log line carries), so tests can assert outcomes without scraping
+ * console output. Nothing in production installs one.
+ */
+export function setToolObserver(fn: ((run: ToolRun) => void) | null): void {
+    observer = fn;
+}
+
 /**
  * Wrap a tool handler with timing and error handling.
  *
@@ -293,6 +313,14 @@ export async function runTool<T>(
         const durationMs = Math.round(performance.now() - start);
         const outcome = options?.outcome?.(result) ?? { success: true };
 
+        observer?.({
+            tool: toolName,
+            success: outcome.success,
+            category: outcome.success
+                ? undefined
+                : (outcome.errorCategory ?? "unknown"),
+            durationMs,
+        });
         if (outcome.success) {
             console.log(
                 toolLogLine(toolName, durationMs, { kind: "success" }),
@@ -310,6 +338,12 @@ export async function runTool<T>(
         const durationMs = Math.round(performance.now() - start);
         const errorCategory = categorizeError(error);
         const ref = newErrorRef();
+        observer?.({
+            tool: toolName,
+            success: false,
+            category: errorCategory,
+            durationMs,
+        });
 
         // The raw message never reaches the model (userFacingError replaces
         // it), so this line, joined to the model's text by `ref`, is the only

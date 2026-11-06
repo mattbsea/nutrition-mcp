@@ -26,14 +26,6 @@ export * from "./food-cache.js";
 export * from "./account.js";
 export * from "./health-store.js";
 
-// Names the routes/export/tools still import until step A2 renames the call
-// sites to the Sqlite* names above. Delete these in A2.
-export {
-    createSqliteHealthSyncStore as createSupabaseHealthSyncStore,
-    createSqliteHealthActivityLinkStore as createSupabaseHealthActivityLinkStore,
-    sqliteHealthSyncCleanupStore as supabaseHealthSyncCleanupStore,
-} from "./health-store.js";
-
 /**
  * Fetch pages via `fetchPage(from, to)` (inclusive, 0-indexed) until a page
  * comes back shorter than `pageSize`. SQLite has no row cap, so the repo's own

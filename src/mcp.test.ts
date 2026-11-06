@@ -81,7 +81,7 @@ import {
     type JsonSchemaType,
 } from "@modelcontextprotocol/server";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
-import * as actualSupabase from "./db/repo.js";
+import * as actualRepo from "./db/repo.js";
 import type { ReferenceRecord } from "./provenance.js";
 import { referenceFromUsda } from "./provenance.js";
 import {
@@ -105,9 +105,9 @@ import {
 } from "./widgets.js";
 
 // Snapshot BEFORE mock.module runs: Bun patches a mocked module's namespace
-// in place, so restoring from the live `actualSupabase` afterwards would hand
+// in place, so restoring from the live `actualRepo` afterwards would hand
 // the next file the mock again. Restore from this copy.
-const realSupabase = { ...actualSupabase };
+const realRepo = { ...actualRepo };
 
 type ConcurrentEdit<T> = Partial<T> | ((row: T) => Partial<T>);
 
@@ -120,7 +120,17 @@ function storedMoved(row: object, guard: object): boolean {
             JSON.stringify((row as Record<string, unknown>)[column] ?? null),
     );
 }
-import { DELETED_ACCOUNT_ANALYTICS_ID } from "./analytics.js";
+import { setToolObserver } from "./tool-runner.js";
+import { OWNER_ID } from "./db/owner.js";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    rmSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { ToolError } from "./errors.js";
 import { addedSugarExtra, type AddedSugarMeta } from "./added-sugar.js";
 import { formatFoodResult, type FoodResult } from "./foods.js";
@@ -1592,7 +1602,7 @@ describe("trendsDayPayloadOf", () => {
 // break every other suite) and restored in afterAll. Same pattern as
 // middleware.test.ts.
 
-const PROFILE_BASE: actualSupabase.Profile = {
+const PROFILE_BASE: actualRepo.Profile = {
     user_id: "u1",
     timezone: "UTC",
     preferred_weight_unit: null,
@@ -1661,7 +1671,7 @@ function fakeUpdateSavedMeal(
                       s.name.toLowerCase() === name.toLowerCase(),
               )
             : undefined;
-    if (clash) throw new realSupabase.SavedMealNameTaken(clash.id);
+    if (clash) throw new realRepo.SavedMealNameTaken(clash.id);
     db.savedMealUpdates.push({ id, fields, items });
     const defined = Object.fromEntries(
         Object.entries(fields).filter(([, v]) => v !== undefined),
@@ -1676,7 +1686,7 @@ function fakeUpdateSavedMeal(
 }
 
 const db = {
-    profile: null as actualSupabase.Profile | null,
+    profile: null as actualRepo.Profile | null,
     goals: null as NutritionGoals | null,
     meals: [] as Meal[],
     // Other meals on the day getMealsByDate reads, kept apart from `meals`
@@ -1708,7 +1718,7 @@ const db = {
     waterInserted: [] as Record<string, unknown>[],
     // Active calories: the rows getActivityInRange and getAllActiveCalories
     // return, and the writes insertActiveCalories saw (with their credit share).
-    activeEntries: [] as actualSupabase.ActiveCaloriesEntry[],
+    activeEntries: [] as actualRepo.ActiveCaloriesEntry[],
     activeInserted: [] as Record<string, unknown>[],
     weightInserted: [] as Record<string, unknown>[],
     weightUpdates: [] as Record<string, unknown>[],
@@ -1727,7 +1737,7 @@ const db = {
     // Ids the delete stubs consider to exist. Deleting one removes it, so a
     // second delete of the same id reports "not found" like the real table.
     rowIds: new Set<string>(),
-    analyticsRows: [] as Record<string, unknown>[],
+    toolRuns: [] as Record<string, unknown>[],
     accountWipes: 0,
     profileReads: [] as string[],
     // Thrown by getMealsInRange/deleteMeal/updateMeal when set: stands in for
@@ -1788,55 +1798,20 @@ const db = {
     foodCacheReads: [] as string[],
 };
 
-/** The two PostgREST reads behind HealthSyncStore.getLinkStatus, plus
- *  update_meal's stored-sugar read (`meals` by id), and nothing else: any
- *  other select through this stub has no chain to call. */
-function healthSyncSelect(table: string) {
-    let idFilter: string | null = null;
-    const chain = {
-        eq: (column: string, value: string) => {
-            if (column === "id") idFilter = value;
-            return chain;
-        },
-        gt: () => chain,
-        not: () => chain,
-        order: () => chain,
-        limit: async () => ({
-            data:
-                table === "health_sync_days" && db.healthSyncSentThrough
-                    ? [{ date: db.healthSyncSentThrough }]
-                    : [],
-            error: null,
-        }),
-        maybeSingle: async () => {
-            db.storedMealReads += table === "meals" ? 1 : 0;
-            return {
-                data:
-                    table === "health_sync_links"
-                        ? db.healthSyncLink
-                        : table === "meals"
-                          ? (db.meals.find((m) => m.id === idFilter) ?? null)
-                          : null,
-                error: null,
-            };
-        },
-    };
-    return chain;
-}
-
 mock.module("./db/repo.js", () => ({
-    ...actualSupabase,
-    // analytics.ts persists every tool call through getSupabase(); intercept it
-    // so a test never depends on Supabase env vars being present, and so the
-    // rows it would have written can be asserted on.
-    getSupabase: () => ({
-        from: (table: string) => ({
-            insert: async (row: Record<string, unknown>) => {
-                if (table === "tool_analytics") db.analyticsRows.push(row);
-                return { error: null };
-            },
-            select: () => healthSyncSelect(table),
-        }),
+    ...actualRepo,
+    // get_profile reads the Apple Health link status through these stores.
+    createSqliteHealthSyncStore: () => ({
+        getLinkStatus: async () =>
+            db.healthSyncLink
+                ? {
+                      ...db.healthSyncLink,
+                      sent_through: db.healthSyncSentThrough,
+                  }
+                : null,
+    }),
+    createSqliteHealthActivityLinkStore: () => ({
+        getActivityLinkStatus: async () => null,
     }),
     deleteAllUserData: async () => {
         db.accountWipes += 1;
@@ -1917,7 +1892,7 @@ mock.module("./db/repo.js", () => ({
             if (!db.concurrentEditPersists) db.concurrentMealEdit = null;
         }
         if (current && guard && storedMoved(current, guard))
-            throw new realSupabase.SnapshotConflictError(id);
+            throw new realRepo.SnapshotConflictError(id);
         db.mealUpdates.push(fields);
         const saved = storedMeal({ ...fields, id });
         db.meals = [saved];
@@ -2003,7 +1978,7 @@ mock.module("./db/repo.js", () => ({
                 notes: (input.notes as string | undefined) ?? null,
                 created_at: "2026-08-07T00:00:00.000Z",
                 idempotency_key: null,
-            } as actualSupabase.ActiveCaloriesEntry,
+            } as actualRepo.ActiveCaloriesEntry,
             deduplicated: db.dedupe,
         };
     },
@@ -2013,8 +1988,8 @@ mock.module("./db/repo.js", () => ({
         db.deleteCalls += 1;
         return db.rowIds.delete(id);
     },
-    activityCreditPctFromProfile: (profile: actualSupabase.Profile | null) =>
-        realSupabase.activityCreditPctFromProfile(profile),
+    activityCreditPctFromProfile: (profile: actualRepo.Profile | null) =>
+        realRepo.activityCreditPctFromProfile(profile),
     deleteWeight: async (_userId: string, id: string) => {
         db.deleteCalls += 1;
         return db.rowIds.delete(id);
@@ -2088,7 +2063,7 @@ mock.module("./db/repo.js", () => ({
         db.profile = {
             ...(db.profile ?? { ...PROFILE_BASE, user_id: userId }),
             ...patch,
-        } as actualSupabase.Profile;
+        } as actualRepo.Profile;
         return db.profile;
     },
     // Ingredients and saved meals (the store functions behind the saved-meal
@@ -2139,7 +2114,7 @@ mock.module("./db/repo.js", () => ({
         const taken = db.savedMeals.find(
             (s) => s.name.toLowerCase() === name.toLowerCase(),
         );
-        if (taken) throw new realSupabase.SavedMealNameTaken(taken.id);
+        if (taken) throw new realRepo.SavedMealNameTaken(taken.id);
         db.savedMealWrites.push({ input, items });
         const row = savedMealRow({
             id: savedMealId(db.savedMeals.length + 1),
@@ -2235,7 +2210,7 @@ mock.module("./db/repo.js", () => ({
             if (!db.concurrentEditPersists) db.concurrentSavedMealEdit = null;
         }
         if (storedMoved(current, guard))
-            throw new realSupabase.SnapshotConflictError(id);
+            throw new realRepo.SnapshotConflictError(id);
         return fakeUpdateSavedMeal(id, fields, null);
     },
     deleteSavedMeal: async (_userId: string, id: string) => {
@@ -2252,10 +2227,19 @@ mock.module("./db/repo.js", () => ({
 }));
 
 afterAll(() => {
-    mock.module("./db/repo.js", () => realSupabase);
+    setToolObserver(null);
+    mock.module("./db/repo.js", () => realRepo);
 });
 
 beforeEach(() => {
+    // Every finished tool call, as the rows the assertions below read.
+    setToolObserver((run) =>
+        db.toolRuns.push({
+            tool_name: run.tool,
+            success: run.success,
+            error_category: run.category,
+        }),
+    );
     db.profile = { ...PROFILE_BASE };
     db.sameDayMeals = [];
     db.goals = null;
@@ -2298,7 +2282,7 @@ beforeEach(() => {
     db.measurementRangeArgs = [];
     db.profilePatches = [];
     db.rowIds = new Set<string>();
-    db.analyticsRows = [];
+    db.toolRuns = [];
     db.accountWipes = 0;
     db.profileReads = [];
     db.failWith = null;
@@ -2967,7 +2951,7 @@ describe("log_meal and update_meal round-trip caffeine_mg", () => {
             });
         });
         const keys = db.inserted.map((input) =>
-            actualSupabase.mealIdempotencyKey(
+            actualRepo.mealIdempotencyKey(
                 "u1",
                 input as unknown as MealInput,
                 at,
@@ -3491,9 +3475,7 @@ describe("added sugar", () => {
                 // re-read then fails the check before any second write.
                 expect(db.mealUpdateGuards).toHaveLength(1);
             });
-            const row = db.analyticsRows.find(
-                (r) => r.tool_name === "update_meal",
-            );
+            const row = db.toolRuns.find((r) => r.tool_name === "update_meal");
             expect(row?.error_category).not.toBe("record_not_found");
         });
 
@@ -3639,7 +3621,7 @@ describe("added sugar", () => {
                 expect(db.inserted).toHaveLength(0);
                 // Refused before the profile read behind the timestamp.
                 expect(db.profileReads).toHaveLength(0);
-                const rows = db.analyticsRows.filter(
+                const rows = db.toolRuns.filter(
                     (r) => r.tool_name === "log_meal",
                 );
                 expect(rows).toHaveLength(2);
@@ -3707,7 +3689,7 @@ describe("added sugar", () => {
                     expect(both.isError).toBeFalsy();
                 });
                 expect(db.mealUpdates).toHaveLength(1);
-                const refused = db.analyticsRows.find(
+                const refused = db.toolRuns.find(
                     (r) => r.tool_name === "update_meal" && !r.success,
                 );
                 expect(refused?.error_category).toBe("added_sugar_missing");
@@ -4386,7 +4368,7 @@ describe("delete tools distinguish deleted from not-found", () => {
 // ToolError, which categorizeError files as record_not_found.
 describe("id params are validated before the database", () => {
     const rowFor = (tool: string) =>
-        db.analyticsRows.find((r) => r.tool_name === tool)!;
+        db.toolRuns.find((r) => r.tool_name === tool)!;
 
     test.each([
         ["delete_meal", "meal", "get_meals_today"],
@@ -4458,7 +4440,7 @@ describe("id params are validated before the database", () => {
 // (table names, casts, constraint names) never reaches the conversation.
 describe("raw database errors never reach the model", () => {
     const rowFor = (tool: string) =>
-        db.analyticsRows.find((r) => r.tool_name === tool)!;
+        db.toolRuns.find((r) => r.tool_name === tool)!;
 
     test("a read failure becomes a category message with a ref", async () => {
         db.failWith = new Error(
@@ -4477,22 +4459,20 @@ describe("raw database errors never reach the model", () => {
             expect(text).not.toContain("Failed to");
             expect(text.startsWith("Error:")).toBe(false);
         });
-        expect(rowFor("get_nutrition_summary").error_category).toBe(
-            "supabase_error",
-        );
+        expect(rowFor("get_nutrition_summary").error_category).toBe("db_error");
     });
 
     test("a rejected value is reported as one, without the cast text", async () => {
         db.failWith = new Error(
-            'Failed to delete meal: invalid input syntax for type uuid: "abc"',
+            "Failed to delete meal: CHECK constraint failed: length(name) BETWEEN 1 AND 200",
         );
         await withTools(null, async (call) => {
             const r = await call("delete_meal", { id: MEAL_ID });
             expect(r.isError).toBe(true);
             const text = textOf(r);
             expect(text).toContain("rejected one of the values");
-            expect(text).not.toContain("invalid input syntax");
-            expect(text).not.toContain("uuid");
+            expect(text).not.toContain("CHECK constraint");
+            expect(text).not.toContain("length(name)");
         });
         expect(rowFor("delete_meal").error_category).toBe("db_rejected_value");
     });
@@ -4568,7 +4548,7 @@ describe("raw database errors never reach the model", () => {
 // refusal.
 describe("date-range listings reject bad and oversized ranges", () => {
     const rowsFor = (tool: string) =>
-        db.analyticsRows.filter((r) => r.tool_name === tool);
+        db.toolRuns.filter((r) => r.tool_name === tool);
 
     test("the meal cap is a month", () => {
         expect(MEALS_RANGE_MAX_DAYS).toBe(31);
@@ -4794,7 +4774,7 @@ describe("meal listings are compact by default", () => {
             expect(textOf(r)).toContain("detail");
         });
         expect(
-            db.analyticsRows.filter((r) => r.tool_name === "get_meals_by_date"),
+            db.toolRuns.filter((r) => r.tool_name === "get_meals_by_date"),
         ).toHaveLength(0);
     });
 
@@ -4822,7 +4802,7 @@ describe("meal listings are compact by default", () => {
                 detail: "full",
             });
         });
-        const row = db.analyticsRows.find(
+        const row = db.toolRuns.find(
             (r) => r.tool_name === "get_meals_by_date",
         )!;
         expect(JSON.stringify(row)).not.toContain("detail");
@@ -5233,7 +5213,7 @@ describe("get_nutrition_summary bounds its meal breakdown", () => {
 // caller-facing message.
 describe("date params are real calendar dates", () => {
     const rowFor = (tool: string) =>
-        db.analyticsRows.find((r) => r.tool_name === tool)!;
+        db.toolRuns.find((r) => r.tool_name === tool)!;
 
     test.each([
         ["get_trends", "end_date", "yesterday"],
@@ -5262,53 +5242,52 @@ describe("date params are real calendar dates", () => {
     });
 });
 
-// ---------- delete_account leaves no trace of the deleted user ----------
+// ---------- delete_account ----------
 
-// deleteAllUserData deletes tool_analytics first, then withAnalytics inserts a
-// fresh row once the handler resolves. tool_analytics.user_id is a plain
-// varchar with no FK, so that insert succeeds and puts the just-deleted user's
-// id straight back into the table the tool promised it had emptied. The row
-// itself is still worth keeping — it must simply not be attributable.
-describe("delete_account analytics", () => {
-    const rowsFor = (tool: string) =>
-        db.analyticsRows.filter((r) => r.tool_name === tool);
+describe("delete_account", () => {
+    let dir: string;
+    let prevData: string | undefined;
+    beforeEach(() => {
+        dir = mkdtempSync(join(tmpdir(), "del-"));
+        prevData = process.env.DATA_DIR;
+        process.env.DATA_DIR = dir;
+    });
+    afterEach(() => {
+        if (prevData === undefined) delete process.env.DATA_DIR;
+        else process.env.DATA_DIR = prevData;
+        rmSync(dir, { recursive: true, force: true });
+    });
 
-    test("a completed deletion is recorded under the sentinel, not the user", async () => {
+    test("a confirmed deletion wipes the database and removes the export archives", async () => {
+        const archive = join(dir, "exports", "u1", "nutrition-mcp-export.zip");
+        mkdirSync(dirname(archive), { recursive: true });
+        writeFileSync(archive, "zip");
         await withTools(null, async (call) => {
             expect(
                 textOf(await call("delete_account", { confirm: true })),
             ).toContain("permanently deleted");
         });
-
         expect(db.accountWipes).toBe(1);
-        const rows = rowsFor("delete_account");
-        expect(rows).toHaveLength(1);
-        expect(rows[0]!.user_id).toBe(DELETED_ACCOUNT_ANALYTICS_ID);
-        expect(rows[0]!.success).toBe(true);
-        expect(db.analyticsRows.some((r) => r.user_id === "u1")).toBe(false);
+        expect(existsSync(archive)).toBe(false);
+        expect(existsSync(join(dir, "exports"))).toBe(false);
+        const runs = db.toolRuns.filter(
+            (r) => r.tool_name === "delete_account",
+        );
+        expect(runs).toHaveLength(1);
+        expect(runs[0]!.success).toBe(true);
     });
 
-    test("a cancelled deletion stays attributed to the user", async () => {
+    test("a cancelled deletion removes nothing", async () => {
+        const archive = join(dir, "exports", "u1", "nutrition-mcp-export.zip");
+        mkdirSync(dirname(archive), { recursive: true });
+        writeFileSync(archive, "zip");
         await withTools(null, async (call) => {
             expect(
                 textOf(await call("delete_account", { confirm: false })),
             ).toContain("cancelled");
         });
-
         expect(db.accountWipes).toBe(0);
-        const rows = rowsFor("delete_account");
-        expect(rows).toHaveLength(1);
-        expect(rows[0]!.user_id).toBe("u1");
-    });
-
-    test("other tools still record the real user id", async () => {
-        await withTools(null, async (call) => {
-            await call("get_profile");
-        });
-
-        const rows = rowsFor("get_profile");
-        expect(rows).toHaveLength(1);
-        expect(rows[0]!.user_id).toBe("u1");
+        expect(existsSync(archive)).toBe(true);
     });
 });
 
@@ -6024,7 +6003,7 @@ describe("manual write tools resolve logged_at in the profile timezone", () => {
 // supabase.test.ts / supabase-window.test.ts.
 describe("body measurements", () => {
     const rowsFor = (tool: string) =>
-        db.analyticsRows.filter((r) => r.tool_name === tool);
+        db.toolRuns.filter((r) => r.tool_name === tool);
 
     test("an explicit unit is stored as entered, plus its millimetres", async () => {
         await withTools(null, async (call) => {
@@ -6601,11 +6580,10 @@ describe("current-time disclosure", () => {
             expect(text).not.toContain("No timezone is set");
         });
 
-        const rows = db.analyticsRows.filter(
+        const rows = db.toolRuns.filter(
             (r) => r.tool_name === "get_current_time",
         );
         expect(rows).toHaveLength(1);
-        expect(rows[0]!.user_id).toBe("u1");
         expect(rows[0]!.success).toBe(true);
     });
 
@@ -6747,8 +6725,6 @@ describe("export_all_data is on the tool surface", () => {
             "goals.csv",
             "goals_history.csv",
             "profile.csv",
-            "account.csv",
-            "telemetry.csv",
             "connections.csv",
             "README.txt",
         ]) {
@@ -6885,12 +6861,9 @@ describe("every tool carries directory-ready annotations", () => {
 
 // The production route minus auth: authenticateBearer's only output is the
 // userId variable, which is what handleMcp hands to the server factory.
-function appFor(userId: string) {
+function appFor(_userId: string) {
     const app = new Hono();
-    app.all("/mcp", (c) => {
-        c.set("userId", userId);
-        return handleMcp(c);
-    });
+    app.all("/mcp", (c) => handleMcp(c));
     return app;
 }
 
@@ -6990,10 +6963,10 @@ describe("/mcp serves the 2026-07-28 revision", () => {
         });
     });
 
-    test("the server is built per request for the authenticated user", async () => {
-        // Two users, then the first again: a per-user cache would read each
-        // profile once, so the third read is what proves per-request.
-        for (const user of ["user-a", "user-b", "user-a"]) {
+    test("the server is built per request for the one owner", async () => {
+        // Three connections: a cache would read the profile once, so the third
+        // read is what proves per-request.
+        for (const user of ["c1", "c2", "c3"]) {
             await withHttpClient(user, { pin: "2026-07-28" }, (client) =>
                 client.listTools(),
             );
@@ -7001,7 +6974,7 @@ describe("/mcp serves the 2026-07-28 revision", () => {
         // One read per user per connection, from the tools/list alone:
         // connect()'s server/discover probe is answered from the bare server,
         // which never touches the profile.
-        expect(db.profileReads).toEqual(["user-a", "user-b", "user-a"]);
+        expect(db.profileReads).toEqual([OWNER_ID, OWNER_ID, OWNER_ID]);
     });
 
     // server/discover is the first request every negotiating client sends and
@@ -7510,10 +7483,9 @@ describe("/mcp serves one tool surface on both protocol eras", () => {
     );
 
     // The tool that writes: a legacy tools/call has to reach insertMeal with
-    // the user the bearer middleware authenticated, not with whoever the
-    // previous request was for.
+    // the owner.
     test.each(ERAS)(
-        "a write reaches the DB for the authenticated user (%p)",
+        "a write reaches the DB for the owner (%p)",
         async (mode) => {
             await withHttpClient("mode-user", mode, async (client) => {
                 const r = await client.callTool({
@@ -7528,9 +7500,9 @@ describe("/mcp serves one tool surface on both protocol eras", () => {
             });
             expect(db.inserted).toHaveLength(1);
             expect(db.inserted[0]?.description).toBe("eggs");
-            // authInfo.extra.userId is the single identity carrier on both
-            // legs; every profile read of this exchange must name that user.
-            expect(new Set(db.profileReads)).toEqual(new Set(["mode-user"]));
+            // There is exactly one principal; every profile read of this
+            // exchange names it, whichever era carried the request.
+            expect(new Set(db.profileReads)).toEqual(new Set([OWNER_ID]));
         },
     );
 });
@@ -7599,7 +7571,7 @@ describe("/mcp still serves 2025-era clients unchanged", () => {
             await client.listTools();
             expect(db.profileReads.length).toBe(before + 2);
         });
-        expect(new Set(db.profileReads)).toEqual(new Set(["legacy-user"]));
+        expect(new Set(db.profileReads)).toEqual(new Set([OWNER_ID]));
     });
 
     // The factory serves the tool-less bare server for the two identity-only
@@ -7773,213 +7745,6 @@ describe("/mcp transport posture", () => {
 // `legacy: "reject"` is safe. A guess derived from request headers would not be
 // trustworthy enough to make that call, so this asserts the value comes from the
 // era the SDK actually negotiated.
-describe("/mcp records the negotiated era for the access log", () => {
-    // Same wiring as appFor, plus the read the access log performs after the
-    // route resolves.
-    function recordingApp(userId: string, seen: (entry: string) => void) {
-        const app = new Hono();
-        app.all("/mcp", async (c) => {
-            c.set("userId", userId);
-            const res = await handleMcp(c);
-            seen(
-                `${c.req.method}:${c.get("mcpEra") ?? "-"}:${c.get("mcpClient") ?? "-"}`,
-            );
-            return res;
-        });
-        return app;
-    }
-
-    // Each entry is "METHOD:era" so the assertions can distinguish a request
-    // the SDK served from one this endpoint refused before the SDK saw it.
-    async function traceFor(
-        mode: EraMode,
-        identity: { name: string; version: string } = {
-            name: "t",
-            version: "0",
-        },
-    ): Promise<string[]> {
-        const seen: string[] = [];
-        const app = recordingApp("era-user", (era) => seen.push(era));
-        const transport = new StreamableHTTPClientTransport(
-            new URL("http://test.local/mcp"),
-            { fetch: async (url, init) => app.request(String(url), init) },
-        );
-        const client = new Client(identity, {
-            versionNegotiation: { mode },
-        });
-        await client.connect(transport);
-        try {
-            await client.listTools();
-        } finally {
-            await client.close();
-        }
-        return seen;
-    }
-
-    test("every served 2025-era request is recorded as legacy", async () => {
-        const seen = await traceFor("legacy");
-        const eras = seen
-            .filter((s) => s.startsWith("POST:"))
-            .map((s) => s.split(":")[1]);
-        // initialize, notifications/initialized (the 202) and tools/list. The
-        // 202 matters most: it is the marker that identifies a legacy client in
-        // the log, so it must carry the era like any other request.
-        expect(eras.length).toBeGreaterThanOrEqual(3);
-        expect(new Set(eras)).toEqual(new Set(["legacy"]));
-    });
-
-    test("every served 2026-era request is recorded as modern", async () => {
-        const seen = await traceFor({ pin: "2026-07-28" });
-        const eras = seen
-            .filter((s) => s.startsWith("POST:"))
-            .map((s) => s.split(":")[1]);
-        expect(eras.length).toBeGreaterThan(0);
-        expect(new Set(eras)).toEqual(new Set(["modern"]));
-    });
-
-    test("the refused GET stream carries no era, not a guessed one", async () => {
-        // A 2025-era client opens the standalone SSE stream with GET, which
-        // handleMcp answers 405 before the SDK runs — so nothing negotiates an
-        // era and the access log must omit the field.
-        const seen = await traceFor("legacy");
-        const gets = seen
-            .filter((s) => s.startsWith("GET:"))
-            .map((s) => s.split(":")[1]);
-        expect(gets.length).toBeGreaterThan(0);
-        expect(new Set(gets)).toEqual(new Set(["-"]));
-    });
-
-    test("a 2026-era client is named on every request, from the envelope", async () => {
-        const seen = await traceFor(
-            { pin: "2026-07-28" },
-            {
-                name: "acme-client",
-                version: "9.9.9",
-            },
-        );
-        const clients = seen
-            .filter((s) => s.startsWith("POST:"))
-            .map((s) => s.split(":")[2]);
-        expect(clients.length).toBeGreaterThan(0);
-        // The modern envelope carries clientInfo on every request, so unlike the
-        // legacy leg there is no request that knows the era but not the client.
-        expect(new Set(clients)).toEqual(new Set(["acme-client/9.9.9"]));
-    });
-
-    test("a 2025-era client is named on initialize, the only request that carries it", async () => {
-        const seen = await traceFor("legacy", {
-            name: "acme-client",
-            version: "9.9.9",
-        });
-        const clients = seen
-            .filter((s) => s.startsWith("POST:"))
-            .map((s) => s.split(":")[2]);
-        // Documents a real limitation rather than papering over it: on the
-        // stateless legacy leg every request builds a fresh server and only
-        // `initialize` carries clientInfo, so the rest log no client. One named
-        // request per connection is still enough to answer who is on this leg.
-        expect(clients).toContain("acme-client/9.9.9");
-        expect(clients).toContain("-");
-    });
-
-    test("a client name cannot forge a log line", async () => {
-        // Same injection surface as the SDK error messages: this value is
-        // client-supplied and goes straight into the access line.
-        const seen = await traceFor(
-            { pin: "2026-07-28" },
-            {
-                name: "evil\n[req] POST /mcp 200 1ms ip=9.9.9.9",
-                version: "1.0",
-            },
-        );
-        const clients = seen
-            .filter((s) => s.startsWith("POST:"))
-            .map((s) => s.split(":")[2]);
-        for (const c of clients) {
-            expect(c).not.toContain("\n");
-            expect(c).not.toContain(" ");
-        }
-        expect(clients[0]).toBe("evil_[req]_POST_/mcp_200_1ms_ip=9.9.9.9/1.0");
-    });
-
-    test("an over-long client name cannot push the real fields off the line", async () => {
-        const seen = await traceFor(
-            { pin: "2026-07-28" },
-            {
-                name: "x".repeat(500),
-                version: "y".repeat(500),
-            },
-        );
-        const client = seen
-            .filter((s) => s.startsWith("POST:"))
-            .map((s) => s.split(":")[2])[0];
-        expect(client).toBe(`${"x".repeat(40)}/${"y".repeat(40)}`);
-    });
-
-    // The access log is a ring buffer holding well under an hour at production
-    // volume, so it cannot answer "has anyone used legacy in the last 30 days".
-    // tool_analytics can, and only if the era actually reaches the row.
-    test.each(ERAS)(
-        "the era reaches the tool_analytics row (%p)",
-        async (mode) => {
-            db.analyticsRows = [];
-            await withHttpClient("u1", mode, (client) =>
-                client.callTool({ name: "get_current_time", arguments: {} }),
-            );
-            const rows = db.analyticsRows.filter(
-                (r) => r.tool_name === "get_current_time",
-            );
-            expect(rows.length).toBe(1);
-            expect(rows[0]?.protocol_era).toBe(
-                mode === "legacy" ? "legacy" : "modern",
-            );
-        },
-    );
-
-    test("a modern tool call records the client that made it", async () => {
-        db.analyticsRows = [];
-        await withHttpClient("u1", { pin: "2026-07-28" }, (client) =>
-            client.callTool({ name: "get_current_time", arguments: {} }),
-        );
-        const row = db.analyticsRows.find(
-            (r) => r.tool_name === "get_current_time",
-        );
-        // withHttpClient's client identifies itself as { name: "t", version: "0" }.
-        expect(row?.client_name).toBe("t/0");
-    });
-
-    test("a legacy tool call records the era but not the client", async () => {
-        db.analyticsRows = [];
-        await withHttpClient("u1", "legacy", (client) =>
-            client.callTool({ name: "get_current_time", arguments: {} }),
-        );
-        const row = db.analyticsRows.find(
-            (r) => r.tool_name === "get_current_time",
-        );
-        // Documents the limitation instead of hiding it: on the stateless legacy
-        // leg a tool call is a separate request from `initialize`, and only
-        // `initialize` carries clientInfo. The era — the field the retirement
-        // decision actually rests on — is still recorded.
-        expect(row?.protocol_era).toBe("legacy");
-        expect(row?.client_name).toBeUndefined();
-    });
-
-    test("a request refused before the factory carries no era", async () => {
-        // 415: the SDK rejects on Content-Type before reading the body, so no
-        // server is built and nothing stamps the trace. Inventing an era here
-        // would corrupt the very count the legacy retirement decision rests on.
-        const seen: string[] = [];
-        const app = recordingApp("era-user", (era) => seen.push(era));
-        const r = await app.request("http://test.local/mcp", {
-            method: "POST",
-            headers: { "content-type": "text/plain" },
-            body: "not json",
-        });
-        expect(r.status).toBe(415);
-        expect(seen).toEqual(["POST:-:-"]);
-    });
-});
-
 // ---------- output schemas are frozen once deployed ----------
 //
 // Hosts (claude.ai, Claude Desktop) cache tools/list for an unknown, possibly
@@ -12397,7 +12162,7 @@ async function withUsda(
         { name: "nutrition-mcp-test", version: "0.0.0" },
         { capabilities: { tools: {}, resources: {} } },
     );
-    registerTools(server, userId, true, null, undefined, usda);
+    registerTools(server, userId, true, null, usda);
     const [clientTransport, serverTransport] =
         InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test-client", version: "0.0.0" });
@@ -12436,7 +12201,7 @@ function usdaDepsFor(
     };
 }
 
-const lastAnalytics = () => db.analyticsRows.at(-1)!;
+const lastAnalytics = () => db.toolRuns.at(-1)!;
 
 describe("USDA tools: listing and annotations", () => {
     test("both tools are read-only, open-world and carry a title", async () => {
@@ -12999,8 +12764,8 @@ describe("get_goal_progress carries the day detail in _meta", () => {
 
 describe("active calories tools", () => {
     const ACTIVE_ENTRY = (
-        over: Partial<actualSupabase.ActiveCaloriesEntry> = {},
-    ): actualSupabase.ActiveCaloriesEntry => ({
+        over: Partial<actualRepo.ActiveCaloriesEntry> = {},
+    ): actualRepo.ActiveCaloriesEntry => ({
         id: ACTIVE_ID,
         user_id: "u1",
         kcal: 400,
@@ -13220,8 +12985,8 @@ describe("active calories tools", () => {
 describe("active calories on the read tools", () => {
     const DAY = "2026-07-26";
     const ACTIVE_ROW = (
-        over: Partial<actualSupabase.ActiveCaloriesEntry> = {},
-    ): actualSupabase.ActiveCaloriesEntry => ({
+        over: Partial<actualRepo.ActiveCaloriesEntry> = {},
+    ): actualRepo.ActiveCaloriesEntry => ({
         id: ACTIVE_ID,
         user_id: "u1",
         kcal: 400,

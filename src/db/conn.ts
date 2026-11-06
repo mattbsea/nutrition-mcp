@@ -5,7 +5,18 @@ let current: Database | null = null;
 
 /** The process-wide connection, opened (and migrated) on first use. */
 export function getDb(): Database {
-    if (!current) current = openDb();
+    if (!current) {
+        // Under `bun test` (NODE_ENV=test) the on-disk database must never be
+        // opened by accident: a test that reaches a real repo function without
+        // installing an in-memory database (setDb) is wrong, and would create
+        // ./data/nutrition.db inside the checkout.
+        if (process.env.NODE_ENV === "test" && !process.env.DATA_DIR) {
+            throw new Error(
+                "getDb() called in a test without setDb(openDb(':memory:')); refusing to open ./data/nutrition.db",
+            );
+        }
+        current = openDb();
+    }
     return current;
 }
 

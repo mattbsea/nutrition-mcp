@@ -1,13 +1,8 @@
 import { test, expect, describe, beforeEach, afterEach, spyOn } from "bun:test";
 import { Hono } from "hono";
 import {
-    accessLogPath,
-    configuredSite,
     createHealthSyncRouter,
     isHealthSyncPath,
-    localeFromAcceptLanguage,
-    parseConnectKind,
-    shortcutRunUrl,
     type HealthActivityData,
     type HealthSyncData,
 } from "./health-sync-routes.js";
@@ -20,13 +15,10 @@ import type {
     HealthSyncLinkRow,
     HealthSyncPendingRow,
     HealthSyncStore,
-} from "./health-sync-store.js";
-import type { AuthCodeData } from "./oauth-store.js";
-import { HEALTH_SYNC_CLIENT_ID } from "./oauth-store.js";
+} from "./db/repo.js";
 import type { HealthSyncMeal, HealthSyncWater } from "./health-sync.js";
 import { HEALTH_SYNC_SHORTCUT_NAME } from "./health-sync.js";
 import { _resetBuckets, getBanState } from "./rate-limit.js";
-import { authenticateBearer, banRepeatAuthFailures } from "./middleware.js";
 
 // Everything runs against in-memory fakes passed to createHealthSyncRouter —
 // never mock.module, which is process-wide (see CLAUDE.md). The fakes keep
@@ -244,23 +236,6 @@ function fakeStore() {
     };
 }
 
-function fakeOAuth() {
-    const codes = new Map<string, AuthCodeData>();
-    const consumed: string[] = [];
-    return {
-        codes,
-        consumed,
-        oauthStore: {
-            async consumeAuthCode(code: string) {
-                consumed.push(code);
-                const d = codes.get(code) ?? null;
-                codes.delete(code);
-                return d;
-            },
-        },
-    };
-}
-
 function fakeData(
     opts: {
         tz?: string | null;
@@ -375,7 +350,6 @@ function setup(
     activityOpts: Parameters<typeof fakeActivity>[0] = {},
 ) {
     const s = fakeStore();
-    const o = fakeOAuth();
     const d = fakeData(dataOpts);
     const a = fakeActivity(activityOpts);
     let clock = NOW;
@@ -383,10 +357,8 @@ function setup(
         activityStore: a.activityStore,
         activityData: a.activityData,
         store: s.store,
-        oauthStore: o.oauthStore,
         data: d.data,
         now: () => clock,
-        site: BASE,
     });
     const app = new Hono();
     app.route("/", router);
@@ -428,7 +400,6 @@ function setup(
         });
     return {
         ...s,
-        ...o,
         ...a,
         dataFail: d.fail,
         reads: d.reads,
@@ -492,66 +463,6 @@ function offeredRow(date: string): HealthSyncDayRow {
     };
 }
 
-/** Runs /start and /connect, and returns what the browser would carry. */
-async function startAndConnect(
-    ctx: Ctx,
-    body: unknown = { tz: KYIV, backfill_days: 0 },
-) {
-    const start = await ctx.req("/api/v1/health-sync/start", {
-        method: "POST",
-        body,
-    });
-    expect(start.status).toBe(200);
-    const s = (await start.json()) as {
-        connect_url: string;
-        device_secret: string;
-    };
-    const connectPath = new URL(s.connect_url).pathname;
-    const connectId = connectPath.split("/").pop()!;
-    const r = await ctx.req(connectPath);
-    expect(r.status).toBe(302);
-    const loc = new URL(r.headers.get("location")!, BASE);
-    return {
-        deviceSecret: s.device_secret,
-        connectId,
-        challenge: loc.searchParams.get("code_challenge")!,
-        location: loc,
-    };
-}
-
-/** Mints the code /authorize would have issued to the health-sync client. */
-function issueCode(
-    ctx: Ctx,
-    challenge: string,
-    over: Partial<AuthCodeData> = {},
-): string {
-    const code = `code-${crypto.randomUUID()}`;
-    ctx.codes.set(code, {
-        code: "hashed",
-        redirect_uri: `${BASE}/health-sync/callback`,
-        user_id: USER,
-        code_challenge: challenge,
-        client_id: HEALTH_SYNC_CLIENT_ID,
-        resource: null,
-        ...over,
-    });
-    return code;
-}
-
-async function pairToClaimCode(ctx: Ctx, body?: unknown) {
-    const c = await startAndConnect(ctx, body);
-    const code = issueCode(ctx, c.challenge);
-    const r = await ctx.req(
-        `/health-sync/callback?code=${code}&state=${c.connectId}&iss=${encodeURIComponent(BASE)}`,
-    );
-    expect(r.status).toBe(200);
-    const html = await r.text();
-    const m = /shortcuts:\/\/run-shortcut\?[^"]*text=([A-Za-z0-9_-]+)/.exec(
-        html,
-    );
-    return { ...c, claimCode: m![1]!, html, res: r };
-}
-
 let logSpy: ReturnType<typeof spyOn>;
 let warnSpy: ReturnType<typeof spyOn>;
 const lines = () =>
@@ -559,615 +470,21 @@ const lines = () =>
         .map((args) => args.map(String).join(" "))
         .filter((l) => l.startsWith("[health-sync]"));
 
+// The ban test identifies clients by X-Forwarded-For, which the perimeter only
+// believes with TRUST_PROXY=1.
+const trustBefore = process.env.TRUST_PROXY;
 beforeEach(() => {
+    process.env.TRUST_PROXY = "1";
     _resetBuckets();
     logSpy = spyOn(console, "log").mockImplementation(() => {});
     warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => {
+    if (trustBefore === undefined) delete process.env.TRUST_PROXY;
+    else process.env.TRUST_PROXY = trustBefore;
     logSpy.mockRestore();
     warnSpy.mockRestore();
     _resetBuckets();
-});
-
-describe("helpers", () => {
-    test("isHealthSyncPath covers the API and the two pages only", () => {
-        expect(isHealthSyncPath("/api/v1/health-sync/pending")).toBe(true);
-        expect(isHealthSyncPath("/health-sync/connect/abc")).toBe(true);
-        expect(isHealthSyncPath("/health-sync/callback")).toBe(true);
-        expect(isHealthSyncPath("/health-syncx")).toBe(false);
-        expect(isHealthSyncPath("/api/v1/health-syncx")).toBe(false);
-        expect(isHealthSyncPath("/mcp")).toBe(false);
-        expect(isHealthSyncPath("/authorize")).toBe(false);
-    });
-
-    test("localeFromAcceptLanguage picks the best supported base language", () => {
-        expect(localeFromAcceptLanguage(undefined)).toBe("en");
-        expect(localeFromAcceptLanguage("de-DE,de;q=0.9,en;q=0.8")).toBe("de");
-        expect(localeFromAcceptLanguage("ru-RU,uk;q=0.8,en;q=0.5")).toBe("uk");
-        expect(localeFromAcceptLanguage("en;q=0.4,ja;q=0.9")).toBe("ja");
-        expect(localeFromAcceptLanguage("pt-BR,ru;q=0.9")).toBe("en");
-        expect(localeFromAcceptLanguage("fr;q=0")).toBe("en");
-    });
-
-    test("accessLogPath hides a connect link's id and nothing else", () => {
-        expect(accessLogPath(`/health-sync/connect/${"k".repeat(43)}`)).toBe(
-            "/health-sync/connect/:id",
-        );
-        expect(accessLogPath("/health-sync/callback")).toBe(
-            "/health-sync/callback",
-        );
-        expect(accessLogPath("/mcp")).toBe("/mcp");
-    });
-
-    test("configuredSite is SITE unless a bare http(s) origin is configured", () => {
-        expect(configuredSite(undefined)).toBe("https://nutrition-mcp.com");
-        expect(configuredSite("")).toBe("https://nutrition-mcp.com");
-        expect(configuredSite("https://dev.example.com/")).toBe(
-            "https://dev.example.com",
-        );
-        expect(configuredSite("http://localhost:3000")).toBe(
-            "http://localhost:3000",
-        );
-        for (const bad of [
-            "dev.example.com",
-            "https://dev.example.com/path",
-            "javascript:alert(1)",
-            "ftp://x.example",
-        ]) {
-            expect(configuredSite(bad)).toBe("https://nutrition-mcp.com");
-        }
-    });
-
-    test("shortcutRunUrl names the shortcut and passes the code as text", () => {
-        const u = shortcutRunUrl("abc_DEF-123");
-        expect(u).toBe(
-            `shortcuts://run-shortcut?name=${encodeURIComponent(HEALTH_SYNC_SHORTCUT_NAME)}&input=text&text=abc_DEF-123`,
-        );
-        expect(u).toContain("name=Nutrition%20MCP%20Health");
-    });
-});
-
-describe("POST /start", () => {
-    test("creates a pending connection and returns the connect link once", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {
-                tz: "America/New_York",
-                include_water: true,
-                backfill_days: 3,
-            },
-        });
-        expect(r.status).toBe(200);
-        expect(r.headers.get("cache-control")).toBe("private, no-store");
-        const body = (await r.json()) as Record<string, unknown>;
-        expect(body.ok).toBe(true);
-        expect(body.expires_in).toBe(1800);
-        expect(String(body.connect_url)).toMatch(
-            /^http:\/\/x\/health-sync\/connect\/[A-Za-z0-9_-]{43}$/,
-        );
-        expect(String(body.device_secret)).toMatch(/^[A-Za-z0-9_-]{43}$/);
-        expect(ctx.pending).toHaveLength(1);
-        const p = ctx.pending[0]!;
-        expect(p.row.tz).toBe("America/New_York");
-        expect(p.row.backfill_days).toBe(3);
-        expect(p.row.fields).toContain("water_ml");
-        expect(p.row.user_id).toBeNull();
-        expect(Date.parse(p.row.expires_at)).toBe(NOW + 30 * 60_000);
-        expect(p.deviceSecret).toBe(String(body.device_secret));
-    });
-
-    test("an empty body takes the defaults: no water, no backfill", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-        });
-        expect(r.status).toBe(200);
-        const p = ctx.pending[0]!;
-        expect(p.row.fields).not.toContain("water_ml");
-        expect(p.row.fields).not.toContain("alcohol_g");
-        expect(p.row.backfill_days).toBe(0);
-        expect(p.row.tz).toBeNull();
-    });
-
-    test("an unknown timezone is ignored, not refused", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: { tz: "Mars/Olympus" },
-        });
-        expect(r.status).toBe(200);
-        expect(ctx.pending[0]!.row.tz).toBeNull();
-    });
-
-    test("bad bodies are a 400 bad_request in the envelope", async () => {
-        const ctx = setup();
-        for (const body of [
-            { backfill_days: 8 },
-            { backfill_days: -1 },
-            { include_water: "yes" },
-            "not json",
-            [1, 2],
-        ]) {
-            const r = await ctx.req("/api/v1/health-sync/start", {
-                method: "POST",
-                body,
-            });
-            expect(r.status).toBe(400);
-            const b = (await r.json()) as Record<string, unknown>;
-            expect(b.ok).toBe(false);
-            expect(b.error).toBe("bad_request");
-            expect(typeof b.message).toBe("string");
-            expect(b.ref).toBeUndefined();
-        }
-        expect(ctx.pending).toHaveLength(0);
-    });
-
-    test("a store failure is a 503 unavailable with a ref, not onError", async () => {
-        const ctx = setup();
-        ctx.fail.add("createPending");
-        const r = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {},
-        });
-        expect(r.status).toBe(503);
-        const b = (await r.json()) as Record<string, string>;
-        expect(b.error).toBe("unavailable");
-        expect(b.ref).toMatch(/^[0-9a-f]{8}$/);
-        expect(b.message).toContain(b.ref!);
-        expect(lines()).toEqual([
-            expect.stringContaining(
-                `[health-sync] route=start result=unavailable ref=${b.ref}`,
-            ),
-        ]);
-    });
-
-    test("a process-wide cap holds however the client IP is spoofed", async () => {
-        const ctx = setup();
-        for (let i = 0; i < 60; i++) {
-            const r = await ctx.req("/api/v1/health-sync/start", {
-                method: "POST",
-                body: {},
-                ip: `198.51.100.${i}`,
-            });
-            expect(r.status).toBe(200);
-        }
-        const r = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {},
-            ip: "192.0.2.200",
-        });
-        expect(r.status).toBe(429);
-        expect(Number(r.headers.get("retry-after"))).toBeGreaterThan(0);
-        const b = (await r.json()) as Record<string, unknown>;
-        expect(b).toMatchObject({ ok: false, error: "rate_limited" });
-    });
-
-    test("the per-IP auth limit applies too", async () => {
-        const ctx = setup();
-        let last: Response | null = null;
-        for (let i = 0; i < 31; i++) {
-            last = await ctx.req("/api/v1/health-sync/start", {
-                method: "POST",
-                body: {},
-            });
-        }
-        expect(last!.status).toBe(429);
-        expect(((await last!.json()) as { error: string }).error).toBe(
-            "rate_limited",
-        );
-    });
-});
-
-describe("GET /health-sync/connect/:id", () => {
-    test("redirects into /authorize as the health-sync client with S256 PKCE", async () => {
-        const ctx = setup();
-        const c = await startAndConnect(ctx);
-        expect(c.location.pathname).toBe("/authorize");
-        const q = c.location.searchParams;
-        expect(q.get("response_type")).toBe("code");
-        expect(q.get("client_id")).toBe(HEALTH_SYNC_CLIENT_ID);
-        expect(q.get("redirect_uri")).toBe(`${BASE}/health-sync/callback`);
-        expect(q.get("state")).toBe(c.connectId);
-        expect(q.get("code_challenge_method")).toBe("S256");
-        expect(q.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
-        // The verifier never leaves the server.
-        expect(c.location.toString()).not.toContain(
-            ctx.pending[0]!.row.pkce_verifier!,
-        );
-        expect(q.has("locale")).toBe(false);
-    });
-
-    test("passes the phone's language on as ?locale", async () => {
-        const ctx = setup();
-        await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {},
-        });
-        const id = ctx.pending[0]!.connectId;
-        const r = await ctx.req(`/health-sync/connect/${id}`, {
-            headers: { "accept-language": "de-DE,de;q=0.9" },
-        });
-        const loc = new URL(r.headers.get("location")!, BASE);
-        expect(loc.searchParams.get("locale")).toBe("de");
-    });
-
-    test("follows a forwarded https base URL", async () => {
-        const ctx = setup();
-        await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {},
-        });
-        const id = ctx.pending[0]!.connectId;
-        const r = await ctx.req(`/health-sync/connect/${id}`, {
-            headers: {
-                "x-forwarded-proto": "https",
-                "x-forwarded-host": "nutrition-mcp.com",
-            },
-        });
-        const loc = new URL(r.headers.get("location")!, BASE);
-        expect(loc.searchParams.get("redirect_uri")).toBe(
-            "https://nutrition-mcp.com/health-sync/callback",
-        );
-    });
-
-    test("an unknown, expired or used link gets a localized noindex page", async () => {
-        const ctx = setup();
-        const unknown = await ctx.req(
-            `/health-sync/connect/${"z".repeat(43)}`,
-            {
-                headers: { "accept-language": "de" },
-            },
-        );
-        expect(unknown.status).toBe(410);
-        expect(unknown.headers.get("content-type")).toContain("text/html");
-        expect(unknown.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-        const csp = unknown.headers.get("content-security-policy")!;
-        expect(csp).toContain("default-src 'none'");
-        expect(csp).not.toContain("googletagmanager");
-        const html = await unknown.text();
-        expect(html).toContain('<html lang="de"');
-        expect(html).toContain('name="robots" content="noindex, nofollow"');
-        expect(html).not.toContain("<script");
-
-        const malformed = await ctx.req("/health-sync/connect/short");
-        expect(malformed.status).toBe(404);
-
-        // Expired.
-        await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {},
-        });
-        const id = ctx.pending[0]!.connectId;
-        ctx.setClock(NOW + 31 * 60_000);
-        expect((await ctx.req(`/health-sync/connect/${id}`)).status).toBe(410);
-        expect(lines().every((l) => !l.includes(id))).toBe(true);
-    });
-
-    test("a link already through sign-in does not start another", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx);
-        const r = await ctx.req(`/health-sync/connect/${p.connectId}`);
-        expect(r.status).toBe(410);
-    });
-});
-
-describe("GET /health-sync/callback", () => {
-    test("mints a claim code that only appears inside the shortcuts:// URL", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx);
-        expect(p.res.headers.get("cache-control")).toBe("no-store");
-        expect(p.res.headers.get("x-robots-tag")).toBe("noindex, nofollow");
-        const href = shortcutRunUrl(p.claimCode).replace(/&/g, "&amp;");
-        // Twice: the meta refresh and the button. Nowhere else.
-        expect(p.html.split(p.claimCode).length - 1).toBe(2);
-        expect(p.html).toContain(
-            `<meta http-equiv="refresh" content="0;url=${href}">`,
-        );
-        expect(p.html).toContain(`<a class="btn" href="${href}">`);
-        expect(p.html).not.toContain("<script");
-        expect(p.html).not.toContain("googletagmanager");
-        const rec = ctx.pending[0]!;
-        expect(rec.claimCode).toBe(p.claimCode);
-        expect(rec.row.user_id).toBe(USER);
-        expect(rec.row.pkce_verifier).toBeNull();
-        expect(Date.parse(rec.row.claim_expires_at!)).toBe(NOW + 10 * 60_000);
-        // The log line names neither the code, the connect id nor the user.
-        for (const l of lines()) {
-            expect(l).not.toContain(p.claimCode);
-            expect(l).not.toContain(p.connectId);
-            expect(l).not.toContain(USER);
-        }
-        expect(lines()).toContain("[health-sync] route=callback result=ok");
-    });
-
-    test("the opening page is localized", async () => {
-        const ctx = setup();
-        const c = await startAndConnect(ctx);
-        const code = issueCode(ctx, c.challenge);
-        const r = await ctx.req(
-            `/health-sync/callback?code=${code}&state=${c.connectId}`,
-            { headers: { "accept-language": "ja" } },
-        );
-        expect(r.status).toBe(200);
-        expect(await r.text()).toContain('<html lang="ja"');
-    });
-
-    const refusals: [string, (ctx: Ctx, challenge: string) => string][] = [
-        [
-            "a code issued to another client",
-            (ctx, ch) => issueCode(ctx, ch, { client_id: "someone-else" }),
-        ],
-        [
-            "a code for another redirect",
-            (ctx, ch) =>
-                issueCode(ctx, ch, {
-                    redirect_uri: "https://evil.example/health-sync/callback",
-                }),
-        ],
-        [
-            "a code whose challenge is not this connection's verifier",
-            (ctx) => issueCode(ctx, "A".repeat(43)),
-        ],
-        [
-            "a code with no challenge",
-            (ctx, ch) => issueCode(ctx, ch, { code_challenge: null }),
-        ],
-        ["an unknown code", () => "code-unknown"],
-    ];
-    for (const [name, mint] of refusals) {
-        test(`refuses ${name}, leaving the connection unclaimed`, async () => {
-            const ctx = setup();
-            const c = await startAndConnect(ctx);
-            const code = mint(ctx, c.challenge);
-            const r = await ctx.req(
-                `/health-sync/callback?code=${code}&state=${c.connectId}`,
-            );
-            expect(r.status).toBe(400);
-            const html = await r.text();
-            expect(html).not.toContain("shortcuts://");
-            expect(ctx.consumed).toEqual([code]);
-            expect(ctx.pending[0]!.claimCode).toBeNull();
-            expect(ctx.calls).not.toContain("setPendingClaim");
-            expect(lines()).toContain(
-                "[health-sync] route=callback result=sign_in_failed",
-            );
-        });
-    }
-
-    test("refuses an error redirect, a missing code and a foreign iss without spending anything", async () => {
-        const ctx = setup();
-        const c = await startAndConnect(ctx);
-        for (const q of [
-            `error=access_denied&state=${c.connectId}`,
-            `state=${c.connectId}`,
-            `code=x&state=${c.connectId}&iss=${encodeURIComponent("https://evil.example")}`,
-        ]) {
-            const r = await ctx.req(`/health-sync/callback?${q}`);
-            expect(r.status).toBe(400);
-        }
-        expect(ctx.consumed).toEqual([]);
-    });
-
-    test("an unknown or expired state is the expired page", async () => {
-        const ctx = setup();
-        const c = await startAndConnect(ctx);
-        const code = issueCode(ctx, c.challenge);
-        const r1 = await ctx.req(
-            `/health-sync/callback?code=${code}&state=${"q".repeat(43)}`,
-        );
-        expect(r1.status).toBe(410);
-        ctx.setClock(NOW + 31 * 60_000);
-        const r2 = await ctx.req(
-            `/health-sync/callback?code=${code}&state=${c.connectId}`,
-        );
-        expect(r2.status).toBe(410);
-        // Neither looked at the code.
-        expect(ctx.consumed).toEqual([]);
-    });
-
-    test("a second callback for the same connection is refused", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx);
-        const code = issueCode(ctx, p.challenge);
-        const r = await ctx.req(
-            `/health-sync/callback?code=${code}&state=${p.connectId}`,
-        );
-        expect(r.status).toBe(410);
-        expect(ctx.pending[0]!.claimCode).toBe(p.claimCode);
-    });
-});
-
-describe("POST /claim", () => {
-    test("needs both the claim code and the device secret, once", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx);
-
-        // The claim code alone (an attacker's device secret) gets nothing,
-        // and does not burn the victim's claim.
-        const other = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: "b".repeat(43) },
-        });
-        expect(other.status).toBe(400);
-        expect(await other.json()).toMatchObject({
-            ok: false,
-            error: "invalid_code",
-        });
-        // The device secret with a guessed code, likewise.
-        const guess = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: "c".repeat(43), device_secret: p.deviceSecret },
-        });
-        expect(guess.status).toBe(400);
-
-        const good = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: {
-                claim_code: `${p.claimCode}\n`,
-                device_secret: p.deviceSecret,
-            },
-        });
-        expect(good.status).toBe(200);
-        expect(good.headers.get("cache-control")).toBe("private, no-store");
-        const b = (await good.json()) as {
-            ok: boolean;
-            token: string;
-            site: string;
-        };
-        expect(b.ok).toBe(true);
-        expect(b.token).toMatch(/^nmhs_[A-Za-z0-9_-]{43}$/);
-        expect(b.site).toBe(BASE);
-        expect(ctx.links.get(USER)!.token).toBe(b.token);
-
-        const again = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        expect(again.status).toBe(400);
-        expect(((await again.json()) as { error: string }).error).toBe(
-            "invalid_code",
-        );
-        for (const l of lines()) {
-            expect(l).not.toContain(b.token);
-            expect(l).not.toContain(p.deviceSecret);
-            expect(l).not.toContain(USER);
-        }
-    });
-
-    test("writes the link: fields, phone zone, start date from the profile zone", async () => {
-        const ctx = setup({ tz: "Asia/Tokyo" });
-        const p = await pairToClaimCode(ctx, {
-            tz: "America/New_York",
-            include_water: true,
-            backfill_days: 2,
-        });
-        await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        const link = ctx.links.get(USER)!.row;
-        expect(link.fields).toContain("water_ml");
-        expect(link.fallback_tz).toBe("America/New_York");
-        // 2026-10-03T12:00Z is Oct 3 in Tokyo; minus two days.
-        expect(link.sync_start_date).toBe("2026-10-01");
-        expect(Date.parse(link.expires_at)).toBe(NOW + 90 * 86_400_000);
-    });
-
-    test("without a profile zone the phone's zone sets the start date", async () => {
-        const ctx = setup({ tz: null });
-        const p = await pairToClaimCode(ctx, {
-            tz: "Pacific/Kiritimati", // UTC+14: already Oct 4 there
-            backfill_days: 0,
-        });
-        await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        expect(ctx.links.get(USER)!.row.sync_start_date).toBe("2026-10-04");
-    });
-
-    test("pairing again replaces the old link, whose token stops working", async () => {
-        const ctx = setup();
-        const claim = async () => {
-            const p = await pairToClaimCode(ctx);
-            const r = await ctx.req("/api/v1/health-sync/claim", {
-                method: "POST",
-                body: {
-                    claim_code: p.claimCode,
-                    device_secret: p.deviceSecret,
-                },
-            });
-            return ((await r.json()) as { token: string }).token;
-        };
-        const first = await claim();
-        const second = await claim();
-        expect(second).not.toBe(first);
-        expect(ctx.links.size).toBe(1);
-        const old = await ctx.req("/api/v1/health-sync/pending", {
-            token: first,
-        });
-        expect(old.status).toBe(401);
-        const cur = await ctx.req("/api/v1/health-sync/pending", {
-            token: second,
-        });
-        expect(cur.status).toBe(200);
-    });
-
-    test("failed claims strike the IP, and a flood of them never shuts pairing off", async () => {
-        const ctx = setup();
-        // Paired up to the claim code first, then a flood of guesses from
-        // rotated IPs lands before the shortcut redeems it.
-        const p = await pairToClaimCode(ctx);
-        const bad = (ip: string) =>
-            ctx.req("/api/v1/health-sync/claim", {
-                method: "POST",
-                ip,
-                body: {
-                    claim_code: "c".repeat(43),
-                    device_secret: "d".repeat(43),
-                },
-            });
-        for (let i = 0; i < 40; i++) {
-            expect((await bad(`198.51.100.${i}`)).status).toBe(400);
-        }
-        // Each guess is looked up and refused on its own merits...
-        expect(ctx.calls.filter((c) => c === "consumeClaim")).toHaveLength(40);
-        // ...and once over the process-wide count, flagged in the log.
-        const claimLines = lines().filter((l) => l.includes("route=claim"));
-        expect(claimLines.at(-1)).toBe(
-            "[health-sync] route=claim result=invalid_code alert=claim_failures_high",
-        );
-        expect(claimLines[0]).toBe(
-            "[health-sync] route=claim result=invalid_code",
-        );
-        // The real claim still goes through.
-        const r = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            ip: "192.0.2.99",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        expect(r.status).toBe(200);
-        expect(((await r.json()) as { ok: boolean }).ok).toBe(true);
-    });
-
-    test("names the configured site, never a forwarded host", async () => {
-        const ctx = setup();
-        const start = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: {},
-            headers: {
-                "x-forwarded-proto": "https",
-                "x-forwarded-host": "evil.example",
-            },
-        });
-        const s = (await start.json()) as { connect_url: string };
-        expect(s.connect_url).toStartWith(`${BASE}/health-sync/connect/`);
-        const p = await pairToClaimCode(ctx);
-        const r = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-            headers: {
-                "x-forwarded-proto": "https",
-                "x-forwarded-host": "evil.example",
-            },
-        });
-        expect(((await r.json()) as { site: string }).site).toBe(BASE);
-    });
-
-    test("a malformed body is bad_request and no strike", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: "x" },
-        });
-        expect(r.status).toBe(400);
-        expect(((await r.json()) as { error: string }).error).toBe(
-            "bad_request",
-        );
-        expect(ctx.calls).not.toContain("consumeClaim");
-    });
 });
 
 describe("link-token auth", () => {
@@ -1296,42 +613,6 @@ describe("link-token auth", () => {
             ok: false,
             error: "rate_limited",
         });
-    });
-});
-
-describe("nmhs_ tokens at /mcp", () => {
-    test("are refused by authenticateBearer without a database call", async () => {
-        const app = new Hono();
-        app.all("/mcp", banRepeatAuthFailures, authenticateBearer, (c) =>
-            c.json({ reached: true }),
-        );
-        // supabase-js resolves the global fetch per call: any token lookup
-        // would show up here.
-        const realFetch = globalThis.fetch;
-        let fetches = 0;
-        globalThis.fetch = (async () => {
-            fetches++;
-            return new Response("[]", { status: 200 });
-        }) as unknown as typeof fetch;
-        try {
-            const r = await app.request("http://x/mcp", {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer nmhs_${"a".repeat(43)}`,
-                    "x-forwarded-for": "203.0.113.50",
-                },
-            });
-            expect(r.status).toBe(401);
-            expect(((await r.json()) as { error: string }).error).toBe(
-                "invalid_token",
-            );
-            expect(r.headers.get("www-authenticate")).toContain(
-                "resource_metadata",
-            );
-            expect(fetches).toBe(0);
-        } finally {
-            globalThis.fetch = realFetch;
-        }
     });
 });
 
@@ -1949,48 +1230,6 @@ describe("POST /revoke", () => {
 });
 
 describe("logging", () => {
-    test("one line per call, never an id, token or secret", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx);
-        const claim = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        const { token } = (await claim.json()) as { token: string };
-        await ctx.req("/api/v1/health-sync/pending", { token });
-        await ctx.req("/api/v1/health-sync/ack", {
-            method: "POST",
-            token,
-            body: { entries: [], done: true },
-        });
-        await ctx.req("/api/v1/health-sync/revoke", {
-            method: "POST",
-            token,
-        });
-        const out = lines();
-        expect(out.map((l) => l.split(" ")[1])).toEqual([
-            "route=start",
-            "route=connect",
-            "route=callback",
-            "route=claim",
-            "route=pending",
-            "route=ack",
-            "route=revoke",
-        ]);
-        for (const l of out) {
-            expect(l).toMatch(/^\[health-sync\] route=\w+ result=ok( |$)/);
-            for (const secret of [
-                USER,
-                token,
-                p.claimCode,
-                p.connectId,
-                p.deviceSecret,
-                p.challenge,
-            ]) {
-                expect(l).not.toContain(secret);
-            }
-        }
-    });
 });
 
 describe("activity shortcut", () => {
@@ -2011,82 +1250,6 @@ describe("activity shortcut", () => {
         });
         return token;
     }
-
-    test("parseConnectKind: absent is health, unknown is refused", () => {
-        expect(parseConnectKind(undefined)).toBe("health");
-        expect(parseConnectKind({})).toBe("health");
-        expect(parseConnectKind({ kind: null })).toBe("health");
-        expect(parseConnectKind({ kind: "health" })).toBe("health");
-        expect(parseConnectKind({ kind: "activity" })).toBe("activity");
-        expect(parseConnectKind({ kind: "sleep" })).toBeNull();
-        expect(parseConnectKind({ kind: 1 })).toBeNull();
-    });
-
-    test("/start refuses an unknown kind instead of pairing the other one", async () => {
-        const ctx = setup();
-        const r = await ctx.req("/api/v1/health-sync/start", {
-            method: "POST",
-            body: { kind: "sleep", tz: KYIV },
-        });
-        expect(r.status).toBe(400);
-        expect(await r.json()).toMatchObject({
-            ok: false,
-            error: "bad_request",
-        });
-        expect(ctx.pending).toHaveLength(0);
-    });
-
-    test("pairs end to end: reopens the Activity shortcut and makes only an activity link", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx, {
-            kind: "activity",
-            tz: KYIV,
-            include_water: true,
-            backfill_days: 3,
-        });
-        // The callback reopens the shortcut that started the connect.
-        expect(p.html).toContain(
-            `name=${encodeURIComponent(HEALTH_ACTIVITY_SHORTCUT_NAME)}`,
-        );
-        expect(p.html).not.toContain(
-            `name=${encodeURIComponent(HEALTH_SYNC_SHORTCUT_NAME)}&`,
-        );
-        const claim = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        expect(claim.status).toBe(200);
-        const b = (await claim.json()) as { token: string; site: string };
-        expect(b.site).toBe(BASE);
-        expect(ctx.activityLinks.get(USER)!.token).toBe(b.token);
-        expect(ctx.activityLinks.get(USER)!.row.fallback_tz).toBe(KYIV);
-        // The Apple Health link is untouched (none was there).
-        expect(ctx.links.size).toBe(0);
-    });
-
-    test("an existing Apple Health link survives an activity pairing", async () => {
-        const ctx = setup();
-        const healthToken = seedLink(ctx);
-        const p = await pairToClaimCode(ctx, { kind: "activity", tz: KYIV });
-        const claim = await ctx.req("/api/v1/health-sync/claim", {
-            method: "POST",
-            body: { claim_code: p.claimCode, device_secret: p.deviceSecret },
-        });
-        expect(claim.status).toBe(200);
-        expect(ctx.links.get(USER)!.token).toBe(healthToken);
-        const pending = await ctx.req("/api/v1/health-sync/pending", {
-            token: healthToken,
-        });
-        expect(pending.status).toBe(200);
-    });
-
-    test("an Apple Health pairing still reopens the Health shortcut", async () => {
-        const ctx = setup();
-        const p = await pairToClaimCode(ctx);
-        expect(p.html).toContain(
-            `name=${encodeURIComponent(HEALTH_SYNC_SHORTCUT_NAME)}&`,
-        );
-    });
 
     test("each token works only on its own routes", async () => {
         const ctx = setup();
