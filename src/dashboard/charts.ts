@@ -126,11 +126,12 @@ export function barChart(opts: {
     unit: string;
     points: BarPoint[];
     goal?: number | null;
+    goals?: (number | null)[];
     cls: string;
 }): Raw {
     const n = opts.points.length;
     const sc = niceScale(
-        Math.max(opts.goal ?? 0, ...opts.points.map((p) => p.value), 0),
+        Math.max(opts.goal ?? 0, ...(opts.goals ?? []).map((v) => v ?? 0), ...opts.points.map((p) => p.value), 0),
     );
     const max = sc.max;
     const y = (v: number) => T + PH - (v / max) * PH;
@@ -153,16 +154,8 @@ export function barChart(opts: {
               />`
             : "",
     );
-    const goal =
-        opts.goal && opts.goal > 0
-            ? html`<line
-                  class="goal"
-                  x1="${L}"
-                  x2="${W - R}"
-                  y1="${f(y(opts.goal))}"
-                  y2="${f(y(opts.goal))}"
-              />`
-            : "";
+    const goals = opts.goals ?? opts.points.map(() => opts.goal ?? null);
+    const goal = goals.map((v, i) => v && v > 0 ? html`<line class="goal" x1="${f(L + slot * i)}" x2="${f(L + slot * (i + 1))}" y1="${f(y(v))}" y2="${f(y(v))}" />` : "");
     const total = opts.points.reduce((s, p) => s + p.value, 0);
     return frame(
         opts.title,

@@ -13,6 +13,7 @@ import {
     getMealItems,
     getMealsInRange,
     getNutritionGoals,
+    getNutritionGoalsHistory,
     getProfile,
     getWaterInRange,
     getWeightInRange,
@@ -24,6 +25,7 @@ import type { Meal, NutritionGoals, Profile } from "../db/repo.js";
 import type { MealItemValues } from "../meal-items.js";
 import { buildDailyBuckets, type DailyBucket } from "../insights.js";
 import { dateInTz, shiftLocalDate, todayInTz } from "../tz.js";
+import { goalsOnDate } from "../goals-history.js";
 import { fromGrams, type WeightUnit } from "../units.js";
 
 export interface DayTotals {
@@ -155,6 +157,7 @@ export interface TrendsData {
     from: string;
     to: string;
     goals: NutritionGoals | null;
+    calorieGoalsByDate: (number | null)[];
     series: DayTotals[];
     weightUnit: WeightUnit;
     weights: WeightPoint[];
@@ -168,14 +171,16 @@ export async function loadTrends(days: TrendRange): Promise<TrendsData> {
     const tz = await getUserTimezone(OWNER_ID);
     const to = todayInTz(tz);
     const from = shiftLocalDate(to, -(days - 1));
-    const [meals, water, activity, weights, goals, unit] = await Promise.all([
-        getMealsInRange(OWNER_ID, from, to, tz),
-        getWaterInRange(OWNER_ID, from, to, tz),
-        getActivityInRange(OWNER_ID, from, to, tz),
-        getWeightInRange(OWNER_ID, from, to, tz),
-        getNutritionGoals(OWNER_ID),
-        weightUnit(),
-    ]);
+    const [meals, water, activity, weights, goals, goalHistory, unit] =
+        await Promise.all([
+            getMealsInRange(OWNER_ID, from, to, tz),
+            getWaterInRange(OWNER_ID, from, to, tz),
+            getActivityInRange(OWNER_ID, from, to, tz),
+            getWeightInRange(OWNER_ID, from, to, tz),
+            getNutritionGoals(OWNER_ID),
+            getNutritionGoalsHistory(OWNER_ID),
+            weightUnit(),
+        ]);
     const buckets = buildDailyBuckets(meals, water, from, to, tz);
     const act = activityByDate(activity, tz);
     const series = buckets.map((b) => dayTotals(b, act.get(b.date)));
@@ -197,6 +202,11 @@ export async function loadTrends(days: TrendRange): Promise<TrendsData> {
         from,
         to,
         goals,
+        calorieGoalsByDate: series.map(
+            (s) =>
+                goalsOnDate(goalHistory, s.date, tz)?.goals.daily_calories ??
+                null,
+        ),
         series,
         weightUnit: unit,
         weights: weightPoints,

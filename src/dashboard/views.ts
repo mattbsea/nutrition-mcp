@@ -330,7 +330,7 @@ export function trendsBody(d: TrendsData): Raw {
                 <h2 id="t-cal">Calories per day</h2>
                 ${
                     hasMeals
-                        ? html`${barChart({ title: "Calories per day", unit: "kcal", points: pts((s) => s.calories), goal: g?.daily_calories ?? null, cls: "s-cal" })}
+                        ? html`${barChart({ title: "Calories per day", unit: "kcal", points: pts((s) => s.calories), goals: d.calorieGoalsByDate, cls: "s-cal" })}
                               <p class="legend">
                                   <span><i class="cal"></i>Eaten</span
                                   >${g?.daily_calories ? html`<span><i class="goal"></i>Goal ${n0(g.daily_calories)}</span>` : ""}<span
