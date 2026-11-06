@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { handleMcp, closeMcpHandler } from "./mcp.js";
 import { createHealthSyncRouter } from "./health-sync-routes.js";
@@ -15,12 +15,14 @@ import { trustProxy } from "./net.js";
 import { getKeys, dataDir, type KeyStore } from "./keys.js";
 import {
     EXPORT_DOWNLOAD_PATH,
+    EXPORT_FILE_NAME,
     readExportArchive,
     startExportCleanup,
     verifyExportLink,
 } from "./export-files.js";
 import { OWNER_ID, closeDb, exportArchivePath, getDb } from "./db/repo.js";
 import { warmWidgets } from "./widgets.js";
+import { sessionOf } from "./dashboard/auth.js";
 import {
     createDashboardRouter,
     type DashboardOptions,
@@ -126,19 +128,33 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
         handleMcp,
     );
 
-    // Signed export download. This step checks only signature and expiry; the
-    // dashboard step adds the login cookie. Any failure is the generic 404.
-    app.get(EXPORT_DOWNLOAD_PATH, (c) => {
+    // Export download. Allowed with EITHER a valid short-lived signature (the
+    // link export_all_data returns) OR the dashboard login cookie. Neither: a
+    // visitor with no credentials at all is sent to the login page when the
+    // dashboard exists; anything else (bad signature, expired, missing file) is
+    // the generic 404.
+    const hasSession = (c: Context): boolean =>
+        opts.dashboard
+            ? sessionOf(
+                  c,
+                  opts.dashboard.sessionSecret(),
+                  opts.dashboard.now?.() ?? new Date(),
+              ) !== null
+            : false;
+    const serveExport = (c: Context, name: string): Response => {
         const rel = exportArchivePath(OWNER_ID);
-        if (
-            !verifyExportLink(
-                opts.exportSecret(),
-                rel,
-                c.req.query("exp"),
-                c.req.query("sig"),
-            )
-        ) {
-            return notFound(c);
+        const signed = verifyExportLink(
+            opts.exportSecret(),
+            rel,
+            c.req.query("exp"),
+            c.req.query("sig"),
+        );
+        if (name !== EXPORT_FILE_NAME) return notFound(c);
+        if (!signed && !hasSession(c)) {
+            const anyCredential = c.req.query("exp") || c.req.query("sig");
+            return opts.dashboard && !anyCredential
+                ? c.redirect("/login", 303)
+                : notFound(c);
         }
         const file = readExportArchive(rel, opts.dataDir);
         if (!file) return notFound(c);
@@ -146,13 +162,16 @@ export function createApp(opts: AppOptions): Hono<{ Bindings: ServerEnv }> {
             status: 200,
             headers: {
                 "Content-Type": "application/zip",
-                "Content-Disposition":
-                    'attachment; filename="nutrition-mcp-export.zip"',
+                "Content-Disposition": `attachment; filename="${EXPORT_FILE_NAME}"`,
                 "Cache-Control": "private, no-store",
                 "X-Content-Type-Options": "nosniff",
             },
         });
-    });
+    };
+    app.get(EXPORT_DOWNLOAD_PATH, (c) => serveExport(c, EXPORT_FILE_NAME));
+    // The only name served is the archive's own: nothing from the request ever
+    // reaches the filesystem, so there is no path to traverse.
+    app.get("/exports/:name", (c) => serveExport(c, c.req.param("name")));
 
     // Server icon (advertised in the MCP serverInfo).
     for (const [path, type] of Object.entries(PUBLIC_ICONS)) {

@@ -8,3 +8,11 @@
 
 # Local Claude Code state — untracked, not ours to format.
 .claude/
+
+# Dashboard views are tagged-template HTML (the `html` helper). Prettier's
+# embedded-HTML formatting rewrites whitespace inside those templates, which
+# changes the rendered page, so these files are kept out of it.
+src/dashboard/views.ts
+src/dashboard/layout.ts
+src/dashboard/charts.ts
+src/dashboard/login-view.ts

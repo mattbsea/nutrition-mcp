@@ -47,6 +47,8 @@ h2{font-size:1.05rem;margin:0 0 .6rem}
 .ring .fill{stroke:var(--c-cal);stroke-linecap:round}
 .ring .fill.over{stroke:var(--warn)}
 .ring text{fill:var(--ink);font-weight:700}
+.ring text.sub{fill:var(--muted);font-weight:400}
+.notes{white-space:pre-wrap;overflow-wrap:anywhere;margin:0}
 .meter{width:100%;height:.6rem;display:block;border-radius:.3rem;background:var(--track)}
 .meter rect.f{fill:var(--c-pro)}
 .meter rect.f.carb{fill:var(--c-carb)}.meter rect.f.fat{fill:var(--c-fat)}.meter rect.f.water{fill:var(--c-water)}.meter rect.f.over{fill:var(--warn)}
@@ -64,6 +66,7 @@ td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
 .chart{width:100%;height:auto;display:block}
 .chart .grid-line{stroke:var(--line);stroke-width:1}
 .chart text{fill:var(--muted);font-size:11px}
+.chart rect{stroke:none}
 .chart .goal{stroke:var(--muted);stroke-dasharray:4 3;stroke-width:1.5;fill:none}
 .chart .line{fill:none;stroke-width:2.5;stroke-linejoin:round;stroke-linecap:round}
 .chart .dot{stroke:var(--surface);stroke-width:1.5}

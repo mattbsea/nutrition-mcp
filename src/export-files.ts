@@ -4,9 +4,9 @@
  * The ZIP lives at DATA_DIR/exports/<exportArchivePath(owner)>. A link is
  * `/exports/download?exp=<unix seconds>&sig=<hmac>`: the HMAC (SHA-256, keyed
  * with the persisted export_secret) covers the expiry and the file path, so a
- * link can be neither extended nor pointed at another file. The serve route
- * (below) checks only signature and expiry in this step; the dashboard step
- * additionally requires the login cookie.
+ * link can be neither extended nor pointed at another file. A download is
+ * allowed with either a valid signature or the dashboard login cookie (see
+ * src/index.ts); a request with neither gets nothing.
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 import {
@@ -18,12 +18,15 @@ import {
     writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
+import { OWNER_ID } from "./db/owner.js";
 import { dataDir } from "./keys.js";
 
 /** Signed link lifetime. The cleanup sweep ages files out on the same horizon. */
 export const EXPORT_TTL_SECONDS = 60 * 60;
 export const EXPORT_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 export const EXPORT_DOWNLOAD_PATH = "/exports/download";
+/** The only file name /exports/:name will ever serve (the archive's own). */
+export const EXPORT_FILE_NAME = "nutrition-mcp-export.zip";
 
 export function exportsDir(dir: string = dataDir()): string {
     return resolve(join(dir, "exports"));
@@ -94,6 +97,24 @@ export function readExportArchive(
 ): Bun.BunFile | null {
     const file = archiveFile(relPath, dir);
     return existsSync(file) ? Bun.file(file) : null;
+}
+
+/** Size and age of the current archive, for the dashboard; null when none. */
+export function exportFileInfo(
+    dir: string = dataDir(),
+): { name: string; bytes: number; modified: string } | null {
+    try {
+        const file = archiveFile(`${OWNER_ID}/${EXPORT_FILE_NAME}`, dir);
+        if (!existsSync(file)) return null;
+        const st = statSync(file);
+        return {
+            name: EXPORT_FILE_NAME,
+            bytes: st.size,
+            modified: st.mtime.toISOString(),
+        };
+    } catch {
+        return null;
+    }
 }
 
 function walk(dir: string): string[] {

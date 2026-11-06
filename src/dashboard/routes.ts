@@ -26,6 +26,39 @@ import {
     setSessionCookie,
 } from "./auth.js";
 import { ASSETS } from "./assets.js";
+import {
+    OWNER_ID,
+    getActivityCreditPct,
+    getNutritionGoals,
+    getPreferredLengthUnit,
+    getPreferredWeightUnit,
+    getProfile,
+    getUserTimezone,
+} from "../db/repo.js";
+import { exportFileInfo } from "../export-files.js";
+import { getHealthSyncStatus } from "../health-sync-status.js";
+import { getBaseUrl } from "../url.js";
+import {
+    SEARCH_LIMIT,
+    loadMeal,
+    loadMealsDay,
+    loadToday,
+    loadTrends,
+    parseDate,
+    parseRange,
+    searchMealsFor,
+} from "./data.js";
+import {
+    healthBody,
+    mealDetailBody,
+    mealNotFoundBody,
+    mealsDayBody,
+    mealsSearchBody,
+    settingsBody,
+    todayBody,
+    trendsBody,
+    type SettingsView,
+} from "./views.js";
 import { html } from "./html.js";
 import { pageResponse, type NavKey, type Page } from "./layout.js";
 import { loginBody } from "./login-view.js";
@@ -222,11 +255,116 @@ export function createDashboardRouter(opts: DashboardOptions) {
         });
     };
 
-    getPage("/", "today", () => ({
+    getPage("/", "today", async () => ({
         title: "Today",
-        body: html`<h1>Today</h1>
-            <p class="sub">Signed in.</p>`,
+        body: todayBody(await loadToday()),
     }));
+
+    getPage("/trends", "trends", async (c) => ({
+        title: "Trends",
+        body: trendsBody(await loadTrends(parseRange(c.req.query("days")))),
+    }));
+
+    getPage("/meals", "meals", async (c) => {
+        const q = (c.req.query("q") ?? "").trim().slice(0, 100);
+        if (q) {
+            const { tz, meals } = await searchMealsFor(q);
+            return {
+                title: "Meals",
+                body: mealsSearchBody(q, tz, meals, SEARCH_LIMIT),
+            };
+        }
+        const day = await loadMealsDay(parseDate(c.req.query("date")));
+        return { title: "Meals", body: mealsDayBody(day) };
+    });
+
+    router.get("/meals/:id", async (c) => {
+        const found = await loadMeal(c.req.param("id"));
+        return pageResponse(c, {
+            title: found ? found.meal.description : "Meal not found",
+            body: found
+                ? mealDetailBody(found.tz, found.meal, found.items)
+                : mealNotFoundBody(),
+            status: found ? 200 : 404,
+            signedIn: { csrf: c.get("csrf"), active: "meals" },
+        });
+    });
+
+    getPage("/apple-health", "health", async () => ({
+        title: "Apple Health",
+        body: healthBody(await getHealthSyncStatus({ now: now() }), now()),
+    }));
+
+    const settingsView = async (
+        c: Context<DashEnv>,
+        extra: Partial<SettingsView> = {},
+    ): Promise<SettingsView> => {
+        const profile = await getProfile(OWNER_ID);
+        return {
+            csrf: c.get("csrf"),
+            goals: await getNutritionGoals(OWNER_ID),
+            tz: await getUserTimezone(OWNER_ID),
+            tzConfigured: Boolean(profile?.timezone),
+            weightUnit: (await getPreferredWeightUnit(OWNER_ID)) ?? "kg",
+            lengthUnit: (await getPreferredLengthUnit(OWNER_ID)) ?? "cm",
+            creditPct: await getActivityCreditPct(OWNER_ID),
+            alcohol: Boolean(profile?.alcohol_tracking_enabled),
+            baseUrl: getBaseUrl(c.req.raw),
+            exportFile: exportFileInfo(opts.dataDir),
+            ...extra,
+        };
+    };
+
+    router.get("/settings", async (c) =>
+        pageResponse(c, {
+            title: "Settings",
+            body: settingsBody(await settingsView(c)),
+            signedIn: { csrf: c.get("csrf"), active: "settings" },
+        }),
+    );
+
+    // Revealing a key means typing the password again: a stolen session cookie
+    // alone must not be enough to read the credentials. Wrong attempts share
+    // the login throttle.
+    router.post("/settings/reveal", async (c) => {
+        const ip = getClientIp(c);
+        const form = await c.req.parseBody();
+        const verdict = throttle.check(ip);
+        let error: string | undefined;
+        let reveal: SettingsView["reveal"];
+        let status = 200;
+        const headers: Record<string, string> = {};
+        if (!verdict.ok) {
+            error = `Too many attempts. Try again in ${verdict.retryAfterSeconds} seconds.`;
+            status = 429;
+            headers["Retry-After"] = String(verdict.retryAfterSeconds);
+        } else if (!(await checker.verify(form.password))) {
+            const lock = throttle.fail(ip);
+            console.log(
+                `[dashboard] reveal failed ip=${maskIp(ip)}${lock ? ` locked=${lock}s` : ""}`,
+            );
+            error = "Incorrect password.";
+            status = 401;
+        } else {
+            throttle.succeed(ip);
+            console.log(
+                `[dashboard] connector details revealed ip=${maskIp(ip)}`,
+            );
+            const base = getBaseUrl(c.req.raw);
+            reveal = {
+                mcpUrl: `${base}/mcp/${opts.mcpKey()}`,
+                shortcutKey: opts.shortcutKey(),
+                shortcutUrl: `${base}/api/v1/health-sync/`,
+            };
+        }
+        return pageResponse(c, {
+            title: "Settings",
+            body: settingsBody(await settingsView(c, { error, reveal })),
+            signedIn: { csrf: c.get("csrf"), active: "settings" },
+            status,
+            headers,
+        });
+    });
 
     return { router, throttle, getPage };
 }
